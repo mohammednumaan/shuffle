@@ -1,0 +1,14 @@
+services:
+  container:
+    image: alpine
+    volumes:
+      - nfs_vol:/mnt/nfs
+    command: sh -c "touch /mnt/nfs/file_from_docker && sleep 3600"
+
+volumes:
+  nfs_vol:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: "addr=127.0.0.1,vers=4,soft"
+      device: ":/data/nfs_storage"
