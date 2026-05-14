@@ -1,16 +1,18 @@
 package main
 
 import (
-	"log"
+	"fmt"
+	"time"
+
 	"github.com/mohammednumaan/shuffle/internal/config"
-	"github.com/mohammednumaan/shuffle/internal/master"
+	"github.com/mohammednumaan/shuffle/internal/mapreduce"
 )
 
-func main(){
+func main() {
 	// the user should provide the cli args as:
-	// go main -mode=master -input-dir=/path/to/input -output-dir=/path/to/output -num-mappers=4 -num-reducers=2 -nfs-path=/path/to/nfs -image=docker/image:tag
+	// go run main.go -mode=master -input-dir=/path/to/input -output-dir=/path/to/output -num-mappers=4 -num-reducers=2 -nfs-path=/path/to/nfs -image=./mapreduce
 	cfg := config.SetupJobConfig()
-	log.Printf("Configuration: %+v\n", cfg)
+	jobId := fmt.Sprintf("job-%d", time.Now().Unix())
 
-	master.Run(cfg)
+	mapreduce.ExecuteMapReduce(cfg, jobId)
 }
