@@ -11,7 +11,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/mohammednumaan/shuffle/internal/config"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -22,10 +25,90 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+type TaskType string
+
+const (
+	MapTask    TaskType = "map"
+	ReduceTask TaskType = "reduce"
+)
+
+type TaskStatus string
+
+const (
+	Pending   TaskStatus = "pending"
+	Running   TaskStatus = "running"
+	Completed TaskStatus = "completed"
+	Failed    TaskStatus = "failed"
+)
+
 type FilePartition struct {
 	StartFile string
 	EndFile   string
 	Files     []string
+}
+
+type Task struct {
+	Id             string
+	Type           TaskType
+	Status         TaskStatus
+	Partition      FilePartition
+	AssignedWorker string
+}
+
+type Master struct {
+	JobId       string
+	MapTasks    []Task
+	ReduceTasks []Task
+}
+
+func NewMaster(jobId string) *Master {
+	return &Master{
+		JobId:       jobId,
+		MapTasks:    []Task{},
+		ReduceTasks: []Task{},
+	}
+}
+
+func NewTask(id string, taskType TaskType, partition FilePartition, workerId string) Task {
+	return Task{
+		Id:             id,
+		Type:           taskType,
+		Status:         Pending,
+		Partition:      partition,
+		AssignedWorker: workerId,
+	}
+}
+
+func Run(cfg *config.Config, jobId string) {
+	// the masters job is to:
+	// 1. create a clusters
+	// 2. split the file and launch mappers
+	clientset := createKubernetsCluster(cfg)
+	numOfNodes := getNumOfNodes(clientset)
+
+	if numOfNodes < cfg.NumMappers {
+		log.Printf("Warning: Number of mappers (%d) is greater than number of nodes (%d).", cfg.NumMappers, numOfNodes)
+	}
+
+	master := NewMaster(jobId)
+	partitions, err := SplitInputFiles(cfg.InputDir, cfg.NumMappers)
+
+	if err != nil {
+		log.Fatalf("Error splitting input files: %v", err)
+	}
+	log.Printf("File partitions: %+v", partitions)
+	launchMapperWorkers(master, cfg, clientset, jobId, partitions)
+	if err := waitForMappersToComplete(master, clientset); err != nil {
+		log.Fatalf("Mapper phase failed: %v", err)
+	}
+}
+
+func getNumOfNodes(clientset *kubernetes.Clientset) int {
+	nodes, err := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		log.Fatalf("Error fetching nodes: %v", err)
+	}
+	return len(nodes.Items)
 }
 
 func SplitInputFiles(inputPath string, numOfMapTasks int) ([]FilePartition, error) {
@@ -55,6 +138,8 @@ func SplitInputFiles(inputPath string, numOfMapTasks int) ([]FilePartition, erro
 	if numOfMapTasks > len(files) {
 		numOfMapTasks = len(files)
 	}
+
+	sort.Strings(files)
 
 	// now i split the files into ranges and the total ranges are M (= numOfMapTasks)
 	totalFilesForEachWorker := len(files) / numOfMapTasks
@@ -89,33 +174,6 @@ func SplitInputFiles(inputPath string, numOfMapTasks int) ([]FilePartition, erro
 
 }
 
-func Run(cfg *config.Config, jobId string) {
-	// the masters job is to:
-	// 1. create a clusters
-	// 2. split the file and launch mappers
-	clientset := createKubernetsCluster(cfg)
-	numOfNodes := getNumOfNodes(clientset)
-
-	if numOfNodes < cfg.NumMappers {
-		log.Printf("Warning: Number of mappers (%d) is greater than number of nodes (%d).", cfg.NumMappers, numOfNodes)
-	}
-
-	partitions, err := SplitInputFiles(cfg.InputDir, cfg.NumMappers)
-	if err != nil {
-		log.Fatalf("Error splitting input files: %v", err)
-	}
-	log.Printf("File partitions: %+v", partitions)
-	launchMapperWorkers(cfg, clientset, jobId, partitions)
-}
-
-func getNumOfNodes(clientset *kubernetes.Clientset) int {
-	nodes, err := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		log.Fatalf("Error fetching nodes: %v", err)
-	}
-	return len(nodes.Items)
-}
-
 func createKubernetsCluster(cfg *config.Config) *kubernetes.Clientset {
 	kubeconfig := cfg.Kubeconfig
 	if kubeconfig == "" {
@@ -137,10 +195,13 @@ func createKubernetsCluster(cfg *config.Config) *kubernetes.Clientset {
 	return clientset
 }
 
-func launchMapperWorkers(cfg *config.Config, clientset *kubernetes.Clientset, jobId string, partitions []FilePartition) {
-	for i := 0; i < cfg.NumMappers; i++ {
+func launchMapperWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.Clientset, jobId string, partitions []FilePartition) {
+	for i := 0; i < len(partitions); i++ {
 		mapperId := fmt.Sprintf("mapper-%d", i)
-		log.Printf("Launching mapper worker: %s", mapperId)
+		taskId := uuid.New().String()
+		task := NewTask(taskId, MapTask, partitions[i], mapperId)
+
+		mt.MapTasks = append(mt.MapTasks, task)
 		job := createMapperJobSpec(jobId, mapperId, cfg, partitions[i])
 		_, err := clientset.BatchV1().Jobs("default").Create(context.TODO(), job, metav1.CreateOptions{})
 		if err != nil {
@@ -150,9 +211,55 @@ func launchMapperWorkers(cfg *config.Config, clientset *kubernetes.Clientset, jo
 	}
 }
 
-func createMapperJobSpec(jobId string, mapperId string, cfg *config.Config, partition FilePartition) *batchv1.Job {
-	outputPath := filepath.Join(cfg.NfsPath, jobId, mapperId)
+func updateTaskProgress(task *Task, clientset *kubernetes.Clientset) {
+	assignedWorker := task.AssignedWorker
+	job, err := clientset.BatchV1().Jobs("default").Get(context.TODO(), assignedWorker, metav1.GetOptions{})
+	if err != nil {
+		log.Printf("Error fetching job status for worker %s: %v", assignedWorker, err)
+		task.Status = Failed
+		return
+	}
 
+	switch {
+	case job.Status.Succeeded > 0:
+		task.Status = Completed
+	case job.Status.Failed > 0:
+		task.Status = Failed
+	case job.Status.Active > 0:
+		task.Status = Running
+	default:
+		task.Status = Pending
+	}
+}
+
+func waitForMappersToComplete(mt *Master, clientset *kubernetes.Clientset) error {
+	for {
+		allTasksCompleted := true
+		for i := range mt.MapTasks {
+			updateTaskProgress(&mt.MapTasks[i], clientset)
+			switch mt.MapTasks[i].Status {
+			case Completed:
+				continue
+			case Failed:
+				return fmt.Errorf("mapper task %s assigned to %s failed", mt.MapTasks[i].Id, mt.MapTasks[i].AssignedWorker)
+			default:
+				allTasksCompleted = false
+			}
+		}
+
+		log.Printf("mapper task statuses: %+v", mt.MapTasks)
+
+		if allTasksCompleted {
+			return nil
+		}
+
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func createMapperJobSpec(jobId string, mapperId string, cfg *config.Config, partition FilePartition) *batchv1.Job {
+
+	outputPath := filepath.Join(cfg.NfsPath, jobId, mapperId)
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      mapperId,
@@ -178,7 +285,7 @@ func createMapperJobSpec(jobId string, mapperId string, cfg *config.Config, part
 								"--mode",
 								"mapper",
 								"--input-dir",
-								cfg.inputDir,
+								cfg.InputDir,
 								"--output-dir",
 								outputPath,
 								"--file-partition",
