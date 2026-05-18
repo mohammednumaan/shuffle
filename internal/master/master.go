@@ -6,6 +6,7 @@ package master
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -21,16 +22,90 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func Run(cfg *config.Config, jobId string) {
+type FilePartition struct {
+	StartFile string
+	EndFile   string
+	Files     []string
+}
 
-	log.Printf("in master.Run with config: %+v\n", cfg)
+func SplitInputFiles(inputPath string, numOfMapTasks int) ([]FilePartition, error) {
+	if numOfMapTasks <= 0 {
+		return nil, errors.New("number of map tasks must be greater than 0")
+	}
+
+	entries, err := os.ReadDir(inputPath)
+	if err != nil {
+		return nil, errors.New(fmt.Sprintf("failed to read input directory: %v", err))
+	}
+
+	files := make([]string, 0)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		// i know the input dir path so using entry.Name() is fine here
+		files = append(files, entry.Name())
+	}
+
+	if len(files) == 0 {
+		return []FilePartition{}, nil
+	}
+
+	if numOfMapTasks > len(files) {
+		numOfMapTasks = len(files)
+	}
+
+	// now i split the files into ranges and the total ranges are M (= numOfMapTasks)
+	totalFilesForEachWorker := len(files) / numOfMapTasks
+	extraFiles := len(files) % numOfMapTasks
+	filePartitions := make([]FilePartition, 0, numOfMapTasks)
+	fmt.Printf("Total files: %d, Files per worker: %d, Extra files: %d\n", len(files), totalFilesForEachWorker, extraFiles)
+
+	start := 0
+	for i := 0; i < numOfMapTasks; i++ {
+		size := totalFilesForEachWorker
+		if extraFiles > 0 {
+			size++
+			extraFiles--
+		}
+
+		end := start + size
+		if end > len(files) {
+			end = len(files)
+		}
+
+		filesInCurrentRange := files[start:end]
+		filePartitions = append(filePartitions, FilePartition{
+			StartFile: filesInCurrentRange[0],
+			EndFile:   filesInCurrentRange[len(filesInCurrentRange)-1],
+			Files:     filesInCurrentRange,
+		})
+
+		start = end
+	}
+
+	return filePartitions, nil
+
+}
+
+func Run(cfg *config.Config, jobId string) {
+	// the masters job is to:
+	// 1. create a clusters
+	// 2. split the file and launch mappers
 	clientset := createKubernetsCluster(cfg)
 	numOfNodes := getNumOfNodes(clientset)
-	log.Printf("Master is running...")
-	log.Printf("Number of nodes in the cluster: %d", numOfNodes)
 
+	if numOfNodes < cfg.NumMappers {
+		log.Printf("Warning: Number of mappers (%d) is greater than number of nodes (%d).", cfg.NumMappers, numOfNodes)
+	}
+
+	partitions, err := SplitInputFiles(cfg.InputDir, cfg.NumMappers)
+	if err != nil {
+		log.Fatalf("Error splitting input files: %v", err)
+	}
+	log.Printf("File partitions: %+v", partitions)
 	launchMapperWorkers(cfg, clientset, jobId)
-	log.Printf("Launched %d mapper workers", cfg.NumMappers)
 }
 
 func getNumOfNodes(clientset *kubernetes.Clientset) int {
@@ -62,11 +137,11 @@ func createKubernetsCluster(cfg *config.Config) *kubernetes.Clientset {
 	return clientset
 }
 
-func launchMapperWorkers(cfg *config.Config, clientset *kubernetes.Clientset, jobId string) {
+func launchMapperWorkers(cfg *config.Config, clientset *kubernetes.Clientset, jobId string, partitions []FilePartition) {
 	for i := 0; i < cfg.NumMappers; i++ {
 		mapperId := fmt.Sprintf("mapper-%d", i)
 		log.Printf("Launching mapper worker: %s", mapperId)
-		job := createMapperJobSpec(jobId, mapperId, cfg)
+		job := createMapperJobSpec(jobId, mapperId, cfg, partitions[i])
 		_, err := clientset.BatchV1().Jobs("default").Create(context.TODO(), job, metav1.CreateOptions{})
 		if err != nil {
 			log.Printf("Error creating job for mapper %s: %v", mapperId, err)
@@ -106,6 +181,8 @@ func createMapperJobSpec(jobId string, mapperId string, cfg *config.Config) *bat
 								cfg.InputDir,
 								"--output-dir",
 								outputPath,
+								"--file-partition",
+								fmt.Sprintf("%s-%s", partitions.StartFile, partitions.EndFile),
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
