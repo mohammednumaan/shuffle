@@ -105,7 +105,7 @@ func Run(cfg *config.Config, jobId string) {
 		log.Fatalf("Error splitting input files: %v", err)
 	}
 	log.Printf("File partitions: %+v", partitions)
-	launchMapperWorkers(cfg, clientset, jobId)
+	launchMapperWorkers(cfg, clientset, jobId, partitions)
 }
 
 func getNumOfNodes(clientset *kubernetes.Clientset) int {
@@ -150,7 +150,7 @@ func launchMapperWorkers(cfg *config.Config, clientset *kubernetes.Clientset, jo
 	}
 }
 
-func createMapperJobSpec(jobId string, mapperId string, cfg *config.Config) *batchv1.Job {
+func createMapperJobSpec(jobId string, mapperId string, cfg *config.Config, partition FilePartition) *batchv1.Job {
 	outputPath := filepath.Join(cfg.NfsPath, jobId, mapperId)
 
 	return &batchv1.Job{
@@ -178,11 +178,11 @@ func createMapperJobSpec(jobId string, mapperId string, cfg *config.Config) *bat
 								"--mode",
 								"mapper",
 								"--input-dir",
-								cfg.InputDir,
+								cfg.inputDir,
 								"--output-dir",
 								outputPath,
 								"--file-partition",
-								fmt.Sprintf("%s-%s", partitions.StartFile, partitions.EndFile),
+								fmt.Sprintf("%s-%s", partition.StartFile, partition.EndFile),
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{

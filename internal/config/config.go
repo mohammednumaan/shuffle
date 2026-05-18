@@ -23,7 +23,7 @@ func SetupJobConfig() *Config {
 	flag.StringVar(&cfg.OutputDir, "output-dir", "", "Path to output directory.")
 	flag.IntVar(&cfg.NumMappers, "num-mappers", 4, "Number of mappers to use.")
 	flag.IntVar(&cfg.NumReducers, "num-reducers", 2, "Number of reducers to use.")
-	flat.StringVar(&cfg.FilePartition, "file-partition", "", "File partition for mapper workers (e.g., '0-99').")
+	flag.StringVar(&cfg.FilePartition, "file-partition", "", "File partition for mapper workers (e.g., '0-99').")
 
 	flag.StringVar(&cfg.NfsPath, "nfs-path", "/mnt/nfs", "Path to NFS directory.")
 	flag.StringVar(&cfg.Image, "image", "", "image to use for mapper and reducer workers.")
