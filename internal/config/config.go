@@ -1,6 +1,9 @@
 package config
 
-import "flag"
+import (
+	"flag"
+	"github.com/mohammednumaan/shuffle/internal/types"
+)
 
 type Config struct {
 	Mode          string
@@ -13,6 +16,12 @@ type Config struct {
 	NfsPath    string
 	Image      string
 	Kubeconfig string
+
+	Mapper types.Mapper
+}
+
+func (cfg *Config) RegisterFn(mapperFn types.Mapper) {
+	cfg.Mapper = mapperFn
 }
 
 func SetupJobConfig() *Config {
