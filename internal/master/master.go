@@ -100,8 +100,6 @@ func SplitInputFiles(inputPath string, numOfMapTasks int) ([]types.FilePartition
 		numOfMapTasks = len(files)
 	}
 
-	sort.Strings(files)
-
 	// now i split the files into ranges and the total ranges are M (= numOfMapTasks)
 	totalFilesForEachWorker := len(files) / numOfMapTasks
 	extraFiles := len(files) % numOfMapTasks
