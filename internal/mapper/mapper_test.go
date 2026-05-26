@@ -1,7 +1,9 @@
 package mapper
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +15,7 @@ import (
 )
 
 type testMapper struct{}
+type testReducer struct{}
 
 func (tm *testMapper) Map(key string, value string, emit types.Emitter) {
 	for _, word := range strings.Fields(value) {
@@ -22,10 +25,39 @@ func (tm *testMapper) Map(key string, value string, emit types.Emitter) {
 	}
 }
 
+func (tr *testReducer) Reduce(key string, values []string) (string, error) {
+	return fmt.Sprintf("%d", len(values)), nil
+}
+
+func decodePartitionRecords(t *testing.T, path string) []types.IntermediateRecord {
+	t.Helper()
+
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("opening partition file failed: %v", err)
+	}
+	defer file.Close()
+
+	decoder := json.NewDecoder(file)
+	var records []types.IntermediateRecord
+	for {
+		var record types.IntermediateRecord
+		if err := decoder.Decode(&record); err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("decoding intermediate record failed: %v", err)
+		}
+		records = append(records, record)
+	}
+
+	return records
+}
+
 func newTestConfig(t *testing.T, data string) *config.Config {
 	t.Helper()
 
-	inputFile := filepath.Join(t.TempDir(), "input.txt")
+	inputFile := filepath.Join(t.TempDir(), "input")
 	if err := os.WriteFile(inputFile, []byte(data), 0o644); err != nil {
 		t.Fatalf("writing test input failed: %v", err)
 	}
@@ -37,7 +69,7 @@ func newTestConfig(t *testing.T, data string) *config.Config {
 		EndOffset:   int64(len(data)),
 		NumReducers: 3,
 	}
-	cfg.RegisterFn(&testMapper{})
+	cfg.RegisterFn(&testMapper{}, &testReducer{})
 
 	return cfg
 }
@@ -108,7 +140,7 @@ func TestProcessFileSplitStopsAfterCrossingEndOffset(t *testing.T) {
 	}
 }
 
-func TestProcessFileSplitReadsLastSplitWithoutTrailingNewline(t *testing.T) {
+func TestProcessFileSplitDoesNotSkipLineIfStartOffsetIsAtValidLine(t *testing.T) {
 	data := "alpha beta\ngamma delta\nepsilon zeta"
 	cfg := newTestConfig(t, data)
 	cfg.StartOffset = int64(strings.Index(data, "epsilon"))
@@ -139,7 +171,7 @@ func TestProcessSplitWritesIntermediateFilesToDisk(t *testing.T) {
 		t.Fatalf("process split returned an error: %v", err)
 	}
 
-	expectedByPartition := map[int][]string{}
+	expectedByPartition := map[int][]types.IntermediateRecord{}
 	keys := make([]string, 0, len(intermediateData))
 	for key := range intermediateData {
 		keys = append(keys, key)
@@ -149,32 +181,49 @@ func TestProcessSplitWritesIntermediateFilesToDisk(t *testing.T) {
 	for _, key := range keys {
 		partition := getPartition(key, cfg.NumReducers)
 		for _, value := range intermediateData[key] {
-			expectedByPartition[partition] = append(expectedByPartition[partition], key+","+value)
+			expectedByPartition[partition] = append(expectedByPartition[partition], types.IntermediateRecord{
+				Key:   key,
+				Value: value,
+			})
 		}
 	}
 
 	for partition := 0; partition < cfg.NumReducers; partition++ {
 		partitionPath := filepath.Join(cfg.OutputDir, fmt.Sprintf("partition-%d", partition))
-		data, err := os.ReadFile(partitionPath)
-		if err != nil {
-			t.Fatalf("reading partition file %s failed: %v", partitionPath, err)
-		}
-
-		content := strings.TrimSpace(string(data))
-		var got []string
-		if content != "" {
-			got = strings.Split(content, "\n")
-		}
-
+		got := decodePartitionRecords(t, partitionPath)
 		expected := expectedByPartition[partition]
 		if len(got) != len(expected) {
-			t.Fatalf("expected %d lines in partition %d, got %d", len(expected), partition, len(got))
+			t.Fatalf("expected %d records in partition %d, got %d", len(expected), partition, len(got))
 		}
 		for i := range expected {
 			if got[i] != expected[i] {
-				t.Fatalf("expected line %d in partition %d to be %q, got %q", i, partition, expected[i], got[i])
+				t.Fatalf("expected record %d in partition %d to be %+v, got %+v", i, partition, expected[i], got[i])
 			}
 		}
+	}
+}
+
+func TestWriteIntermediatePairsToDiskUsesJSONLines(t *testing.T) {
+	outputDir := t.TempDir()
+	cfg := &config.Config{NumReducers: 1}
+	intermediatePairs := map[string][]string{
+		`alpha,"beta"`: {"line 1\nline 2"},
+	}
+
+	if err := writeIntermediatePairsToDisk(cfg, intermediatePairs, outputDir); err != nil {
+		t.Fatalf("writeIntermediatePairsToDisk returned an error: %v", err)
+	}
+
+	records := decodePartitionRecords(t, filepath.Join(outputDir, "partition-0"))
+
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	if records[0].Key != `alpha,"beta"` {
+		t.Fatalf("expected key %q, got %q", `alpha,"beta"`, records[0].Key)
+	}
+	if records[0].Value != "line 1\nline 2" {
+		t.Fatalf("expected value %q, got %q", "line 1\nline 2", records[0].Value)
 	}
 }
 

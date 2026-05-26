@@ -2,6 +2,7 @@ package mapper
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -205,10 +206,14 @@ func writeIntermediatePairsToDisk(cfg *config.Config, intermediatePairs map[stri
 }
 
 func writeToFile(writer *bufio.Writer, key string, values []string) error {
+	encoder := json.NewEncoder(writer)
 	for _, value := range values {
-		_, err := writer.WriteString(fmt.Sprintf("%s,%s\n", key, value))
-		if err != nil {
-			return fmt.Errorf("writing key %q: %w", key, err)
+		record := types.IntermediateRecord{
+			Key:   key,
+			Value: value,
+		}
+		if err := encoder.Encode(record); err != nil {
+			return fmt.Errorf("encoding key %q: %w", key, err)
 		}
 	}
 	return nil

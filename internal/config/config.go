@@ -7,12 +7,14 @@ import (
 )
 
 type Config struct {
-	Mode        string
-	InputDir    string
-	OutputDir   string
+	Mode      string
+	InputDir  string
+	OutputDir string
+
 	InputFile   string
 	StartOffset int64
 	EndOffset   int64
+
 	NumMappers  int
 	NumReducers int
 	SplitSizeMB int64
@@ -21,11 +23,14 @@ type Config struct {
 	Image      string
 	Kubeconfig string
 
-	Mapper types.Mapper
+	Mapper     types.Mapper
+	Reducer    types.Reducer
+	ReducerIdx int
 }
 
-func (cfg *Config) RegisterFn(mapperFn types.Mapper) {
+func (cfg *Config) RegisterFn(mapperFn types.Mapper, reducerFn types.Reducer) {
 	cfg.Mapper = mapperFn
+	cfg.Reducer = reducerFn
 }
 
 func SetupJobConfig() *Config {
@@ -44,6 +49,7 @@ func SetupJobConfig() *Config {
 	flag.StringVar(&cfg.NfsPath, "nfs-path", "/mnt/nfs", "path to the nfs mount")
 	flag.StringVar(&cfg.Image, "image", "", "image that contains the worker binary")
 	flag.StringVar(&cfg.Kubeconfig, "kubeconfig", "", "absolute path to the kubeconfig file")
+	flag.IntVar(&cfg.ReducerIdx, "reducer-idx", 0, "index of the reducer (0-based)")
 	flag.Parse()
 
 	return cfg

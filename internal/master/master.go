@@ -63,6 +63,11 @@ func Run(cfg *config.Config, jobId string) {
 	if err := waitForMappersToComplete(master, clientset); err != nil {
 		log.Fatalf("mapper phase failed: %v", err)
 	}
+
+	launchReducerWorkers(master, cfg, clientset)
+	if err := waitForReducersToComplete(master, clientset); err != nil {
+		log.Fatalf("reducer phase failed: %v", err)
+	}
 }
 
 func validateMasterConfig(cfg *config.Config) error {
@@ -190,7 +195,20 @@ func launchReducerWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.
 	for i := 0; i < cfg.NumReducers; i++ {
 		jobId := mt.JobId
 		reducerId := fmt.Sprintf("%s-reducer-%d", jobId, i)
-		job := createReducerJobSpec(jobId, reducerId, cfg)
+
+		taskId := uuid.New().String()
+		outputPath := filepath.Join(cfg.NfsPath, jobId)
+
+		task := types.Task{
+			Id:             taskId,
+			Type:           types.ReduceTask,
+			Status:         types.Pending,
+			AssignedWorker: reducerId,
+			OutputPath:     outputPath,
+		}
+
+		mt.ReduceTasks = append(mt.ReduceTasks, task)
+		job := createReducerJobSpec(jobId, cfg, reducerId, i, outputPath)
 
 		_, err := clientset.BatchV1().Jobs("default").Create(context.TODO(), job, metav1.CreateOptions{})
 		if err != nil {
@@ -272,6 +290,8 @@ func createMapperJobSpec(jobId string, cfg *config.Config, inputSplit types.Inpu
 								"./mapreduce",
 								"--mode",
 								"mapper",
+								"--num-reducers",
+								strconv.Itoa(cfg.NumReducers),
 								"--input-file",
 								inputSplit.FilePath,
 								"--output-dir",
@@ -305,9 +325,8 @@ func createMapperJobSpec(jobId string, cfg *config.Config, inputSplit types.Inpu
 		},
 	}
 }
-func createReducerJobSpec(jobId string, reducerId string, cfg *config.Config) *batchv1.Job {
+func createReducerJobSpec(jobId string, cfg *config.Config, reducerId string, reducerIdx int, outputPath string) *batchv1.Job {
 	inputPath := filepath.Join(cfg.NfsPath, jobId)
-	outputPath := filepath.Join(cfg.NfsPath, jobId)
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -333,6 +352,10 @@ func createReducerJobSpec(jobId string, reducerId string, cfg *config.Config) *b
 								"./mapreduce",
 								"--mode",
 								"reducer",
+								"--num-reducers",
+								strconv.Itoa(cfg.NumReducers),
+								"--reducer-idx",
+								strconv.Itoa(reducerIdx),
 								"--input-dir",
 								inputPath,
 								"--output-dir",

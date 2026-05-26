@@ -31,10 +31,19 @@ type Task struct {
 	OutputPath     string
 }
 
+type IntermediateRecord struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
 type Emitter interface {
 	Emit(key string, value string) error
 }
 
 type Mapper interface {
 	Map(key string, value string, emit Emitter)
+}
+
+type Reducer interface {
+	Reduce(key string, values []string) (string, error)
 }
