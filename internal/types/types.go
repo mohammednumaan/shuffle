@@ -16,17 +16,17 @@ const (
 	Failed    TaskStatus = "failed"
 )
 
-type FilePartition struct {
-	StartFile string
-	EndFile   string
-	Files     []string
+type InputSplit struct {
+	FilePath    string
+	StartOffset int64
+	EndOffset   int64
 }
 
 type Task struct {
 	Id             string
 	Type           TaskType
 	Status         TaskStatus
-	Partition      FilePartition
+	Split          InputSplit
 	AssignedWorker string
 	OutputPath     string
 }

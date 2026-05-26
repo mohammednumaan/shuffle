@@ -11,7 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -41,27 +41,54 @@ func NewMaster(jobId string) *Master {
 }
 
 func Run(cfg *config.Config, jobId string) {
-	// the masters job is to:
-	// 1. create a clusters
-	// 2. split the file and launch mappers
+	if err := validateMasterConfig(cfg); err != nil {
+		log.Fatalf("invalid master config: %v", err)
+	}
+
 	clientset := createKubernetsCluster(cfg)
 	numOfNodes := getNumOfNodes(clientset)
 
 	if numOfNodes < cfg.NumMappers {
-		log.Printf("Warning: Number of mappers (%d) is greater than number of nodes (%d).", cfg.NumMappers, numOfNodes)
+		log.Printf("warning: number of mappers (%d) is greater than number of nodes (%d)", cfg.NumMappers, numOfNodes)
 	}
 
 	master := NewMaster(jobId)
-	partitions, err := SplitInputFiles(cfg.InputDir, cfg.NumMappers)
+	partitions, err := BuildInputSplits(cfg.InputDir, cfg.SplitSizeMB*1024*1024)
 
 	if err != nil {
-		log.Fatalf("Error splitting input files: %v", err)
+		log.Fatalf("splitting input files failed: %v", err)
 	}
-	log.Printf("File partitions: %+v", partitions)
+	log.Printf("input splits: %+v", partitions)
 	launchMapperWorkers(master, cfg, clientset, partitions)
 	if err := waitForMappersToComplete(master, clientset); err != nil {
-		log.Fatalf("Mapper phase failed: %v", err)
+		log.Fatalf("mapper phase failed: %v", err)
 	}
+}
+
+func validateMasterConfig(cfg *config.Config) error {
+	if cfg == nil {
+		return errors.New("config is nil")
+	}
+	if cfg.InputDir == "" {
+		return errors.New("input dir is required")
+	}
+	if cfg.NfsPath == "" {
+		return errors.New("nfs path is required")
+	}
+	if cfg.Image == "" {
+		return errors.New("image is required")
+	}
+	if cfg.NumReducers <= 0 {
+		return errors.New("num reducers must be greater than zero")
+	}
+	if cfg.NumMappers <= 0 {
+		return errors.New("num mappers must be greater than zero")
+	}
+	if cfg.SplitSizeMB <= 0 {
+		return errors.New("split size mb must be greater than zero")
+	}
+
+	return nil
 }
 
 func getNumOfNodes(clientset *kubernetes.Clientset) int {
@@ -72,65 +99,43 @@ func getNumOfNodes(clientset *kubernetes.Clientset) int {
 	return len(nodes.Items)
 }
 
-func SplitInputFiles(inputPath string, numOfMapTasks int) ([]types.FilePartition, error) {
-	if numOfMapTasks <= 0 {
-		return nil, errors.New("number of map tasks must be greater than 0")
+func BuildInputSplits(inputDir string, splitSizeByte int64) ([]types.InputSplit, error) {
+	if splitSizeByte <= 0 {
+		return nil, errors.New("split size must be greater than zero")
 	}
 
-	entries, err := os.ReadDir(inputPath)
+	entries, err := os.ReadDir(inputDir)
 	if err != nil {
-		return nil, errors.New(fmt.Sprintf("failed to read input directory: %v", err))
+		return nil, fmt.Errorf("failed to read input directory: %w", err)
 	}
 
-	files := make([]string, 0)
+	var splits []types.InputSplit
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 
-		// i know the input dir path so using entry.Name() is fine here
-		files = append(files, entry.Name())
-	}
-
-	if len(files) == 0 {
-		return []types.FilePartition{}, nil
-	}
-
-	if numOfMapTasks > len(files) {
-		numOfMapTasks = len(files)
-	}
-
-	// now i split the files into ranges and the total ranges are M (= numOfMapTasks)
-	totalFilesForEachWorker := len(files) / numOfMapTasks
-	extraFiles := len(files) % numOfMapTasks
-	filePartitions := make([]types.FilePartition, 0, numOfMapTasks)
-	fmt.Printf("Total files: %d, Files per worker: %d, Extra files: %d\n", len(files), totalFilesForEachWorker, extraFiles)
-
-	start := 0
-	for i := 0; i < numOfMapTasks; i++ {
-		size := totalFilesForEachWorker
-		if extraFiles > 0 {
-			size++
-			extraFiles--
+		filePath := filepath.Join(inputDir, entry.Name())
+		fileInfo, err := os.Stat(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to stat file %s: %w", filePath, err)
 		}
 
-		end := start + size
-		if end > len(files) {
-			end = len(files)
+		fileSize := fileInfo.Size()
+		for start := int64(0); start < fileSize; start += splitSizeByte {
+			end := start + splitSizeByte
+			if end > fileSize {
+				end = fileSize
+			}
+			splits = append(splits, types.InputSplit{
+				FilePath:    filePath,
+				StartOffset: start,
+				EndOffset:   end,
+			})
 		}
-
-		filesInCurrentRange := files[start:end]
-		filePartitions = append(filePartitions, types.FilePartition{
-			StartFile: filesInCurrentRange[0],
-			EndFile:   filesInCurrentRange[len(filesInCurrentRange)-1],
-			Files:     filesInCurrentRange,
-		})
-
-		start = end
 	}
 
-	return filePartitions, nil
-
+	return splits, nil
 }
 
 func createKubernetsCluster(cfg *config.Config) *kubernetes.Clientset {
@@ -154,10 +159,10 @@ func createKubernetsCluster(cfg *config.Config) *kubernetes.Clientset {
 	return clientset
 }
 
-func launchMapperWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.Clientset, filePartitions []types.FilePartition) {
-	for i := 0; i < len(filePartitions); i++ {
+func launchMapperWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.Clientset, inputSplits []types.InputSplit) {
+	for i := 0; i < len(inputSplits); i++ {
 		jobId := mt.JobId
-		mapperId := fmt.Sprintf("mapper-%d", i)
+		mapperId := fmt.Sprintf("%s-mapper-%d", jobId, i)
 		taskId := uuid.New().String()
 
 		outputPath := filepath.Join(cfg.NfsPath, jobId, mapperId)
@@ -165,17 +170,17 @@ func launchMapperWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.C
 			Id:             taskId,
 			Type:           types.MapTask,
 			Status:         types.Pending,
-			Partition:      filePartitions[i],
+			Split:          inputSplits[i],
 			AssignedWorker: mapperId,
 			OutputPath:     outputPath,
 		}
 		mt.MapTasks = append(mt.MapTasks, task)
 
-		job := createMapperJobSpec(jobId, cfg, filePartitions[i], mapperId, outputPath)
+		job := createMapperJobSpec(jobId, cfg, inputSplits[i], mapperId, outputPath)
 		_, err := clientset.BatchV1().Jobs("default").Create(context.TODO(), job, metav1.CreateOptions{})
 
 		if err != nil {
-			log.Printf("Error creating job for mapper %s: %v", mapperId, err)
+			log.Printf("creating job for mapper %s failed: %v", mapperId, err)
 			os.Exit(1)
 		}
 	}
@@ -184,12 +189,12 @@ func launchMapperWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.C
 func launchReducerWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.Clientset) {
 	for i := 0; i < cfg.NumReducers; i++ {
 		jobId := mt.JobId
-		reducerId := fmt.Sprintf("reducer-%d", i)
+		reducerId := fmt.Sprintf("%s-reducer-%d", jobId, i)
 		job := createReducerJobSpec(jobId, reducerId, cfg)
 
 		_, err := clientset.BatchV1().Jobs("default").Create(context.TODO(), job, metav1.CreateOptions{})
 		if err != nil {
-			log.Printf("Error creating job for reducer %s: %v", reducerId, err)
+			log.Printf("creating job for reducer %s failed: %v", reducerId, err)
 			os.Exit(1)
 		}
 	}
@@ -199,7 +204,7 @@ func updateTaskProgress(task *types.Task, clientset *kubernetes.Clientset) {
 	assignedWorker := task.AssignedWorker
 	job, err := clientset.BatchV1().Jobs("default").Get(context.TODO(), assignedWorker, metav1.GetOptions{})
 	if err != nil {
-		log.Printf("Error fetching job status for worker %s: %v", assignedWorker, err)
+		log.Printf("fetching job status for worker %s failed: %v", assignedWorker, err)
 		task.Status = types.Failed
 		return
 	}
@@ -241,7 +246,7 @@ func waitForMappersToComplete(mt *Master, clientset *kubernetes.Clientset) error
 	}
 }
 
-func createMapperJobSpec(jobId string, cfg *config.Config, filePartition types.FilePartition, mapperId, outputPath string) *batchv1.Job {
+func createMapperJobSpec(jobId string, cfg *config.Config, inputSplit types.InputSplit, mapperId, outputPath string) *batchv1.Job {
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -267,12 +272,14 @@ func createMapperJobSpec(jobId string, cfg *config.Config, filePartition types.F
 								"./mapreduce",
 								"--mode",
 								"mapper",
-								"--input-dir",
-								cfg.InputDir,
+								"--input-file",
+								inputSplit.FilePath,
 								"--output-dir",
 								outputPath,
-								"--file-partition",
-								fmt.Sprintf("%s-%s", filePartition.StartFile, filePartition.EndFile),
+								"--start-offset",
+								strconv.FormatInt(inputSplit.StartOffset, 10),
+								"--end-offset",
+								strconv.FormatInt(inputSplit.EndOffset, 10),
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{

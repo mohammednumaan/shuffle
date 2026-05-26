@@ -2,27 +2,19 @@ package mapper
 
 import (
 	"fmt"
-	"github.com/mohammednumaan/shuffle/internal/config"
-	"github.com/mohammednumaan/shuffle/internal/types"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/mohammednumaan/shuffle/internal/config"
+	"github.com/mohammednumaan/shuffle/internal/types"
 )
 
-func NewTestConfig() *config.Config {
-	return &config.Config{
-		InputDir:      "./test_files",
-		OutputDir:     "./output",
-		FilePartition: "new_file1.txt,new_file5.txt",
-		NumReducers:   3,
-	}
-}
+type testMapper struct{}
 
-type TestMapper struct{}
-
-func (tm *TestMapper) Map(key string, value string, emit types.Emitter) {
+func (tm *testMapper) Map(key string, value string, emit types.Emitter) {
 	for _, word := range strings.Fields(value) {
 		if err := emit.Emit(word, "1"); err != nil {
 			return
@@ -30,54 +22,121 @@ func (tm *TestMapper) Map(key string, value string, emit types.Emitter) {
 	}
 }
 
-func TestProcessFiles(t *testing.T) {
-	cfg := NewTestConfig()
-	cfg.OutputDir = t.TempDir()
-	cfg.RegisterFn(&TestMapper{})
-	intermediateData, err := processFiles(cfg)
+func newTestConfig(t *testing.T, data string) *config.Config {
+	t.Helper()
+
+	inputFile := filepath.Join(t.TempDir(), "input.txt")
+	if err := os.WriteFile(inputFile, []byte(data), 0o644); err != nil {
+		t.Fatalf("writing test input failed: %v", err)
+	}
+
+	cfg := &config.Config{
+		InputFile:   inputFile,
+		OutputDir:   filepath.Join(t.TempDir(), "output"),
+		StartOffset: 0,
+		EndOffset:   int64(len(data)),
+		NumReducers: 3,
+	}
+	cfg.RegisterFn(&testMapper{})
+
+	return cfg
+}
+
+func TestProcessSplitReadsWholeFile(t *testing.T) {
+	cfg := newTestConfig(t, "apple kiwi\nmango kiwi\n")
+
+	intermediateData, err := processSplit(cfg)
 	if err != nil {
-		t.Fatalf("ProcessFiles returned an error: %v", err)
+		t.Fatalf("process split returned an error: %v", err)
 	}
 
 	expected := map[string][]string{
-		"apple":       {"1"},
-		"berry":       {"1"},
-		"dragonfruit": {"1"},
-		"kiwi":        {"1", "1"},
-		"lime":        {"1", "1"},
-		"mango":       {"1", "1", "1"},
-		"papaya":      {"1"},
+		"apple": {"1"},
+		"kiwi":  {"1", "1"},
+		"mango": {"1"},
 	}
 
 	for key, expectedValues := range expected {
 		values, exists := intermediateData[key]
 		if !exists {
-			t.Errorf("Expected key %q not found in intermediate data", key)
-			continue
+			t.Fatalf("expected key %q to exist", key)
 		}
 		if len(values) != len(expectedValues) {
-			t.Errorf("For key %q, expected %d values but got %d", key, len(expectedValues), len(values))
-			continue
-		}
-
-		for i, expectedValue := range expectedValues {
-			if values[i] != expectedValue {
-				t.Errorf("For key %q, expected value %q at index %d but got %q", key, expectedValue, i, values[i])
-			}
+			t.Fatalf("expected %d values for key %q, got %d", len(expectedValues), key, len(values))
 		}
 	}
 }
 
-func TestProcessFilesWritesIntermediateFilesToDisk(t *testing.T) {
-	cfg := NewTestConfig()
-	if err := os.RemoveAll(cfg.OutputDir); err != nil {
-		t.Fatalf("failed to clear output directory %s: %v", cfg.OutputDir, err)
-	}
-	cfg.RegisterFn(&TestMapper{})
+func TestProcessFileSplitSkipsPartialFirstLine(t *testing.T) {
+	data := "alpha beta\ngamma delta\nepsilon zeta\n"
+	cfg := newTestConfig(t, data)
+	cfg.StartOffset = int64(strings.Index(data, "beta"))
+	cfg.EndOffset = int64(len(data))
 
-	intermediateData, err := processFiles(cfg)
+	intermediateData, err := processSplit(cfg)
 	if err != nil {
-		t.Fatalf("processFiles returned an error: %v", err)
+		t.Fatalf("process split returned an error: %v", err)
+	}
+
+	if _, exists := intermediateData["alpha"]; exists {
+		t.Fatal("expected first partial line to be skipped")
+	}
+	for _, key := range []string{"gamma", "delta", "epsilon", "zeta"} {
+		if _, exists := intermediateData[key]; !exists {
+			t.Fatalf("expected key %q to exist", key)
+		}
+	}
+}
+
+func TestProcessFileSplitStopsAfterCrossingEndOffset(t *testing.T) {
+	data := "alpha beta\ngamma delta\nepsilon zeta\n"
+	cfg := newTestConfig(t, data)
+	cfg.EndOffset = int64(strings.Index(data, "epsilon"))
+
+	intermediateData, err := processSplit(cfg)
+	if err != nil {
+		t.Fatalf("process split returned an error: %v", err)
+	}
+
+	if _, exists := intermediateData["epsilon"]; exists {
+		t.Fatal("expected records starting at or after the end offset to be excluded")
+	}
+	for _, key := range []string{"alpha", "beta", "gamma", "delta"} {
+		if _, exists := intermediateData[key]; !exists {
+			t.Fatalf("expected key %q to exist", key)
+		}
+	}
+}
+
+func TestProcessFileSplitReadsLastSplitWithoutTrailingNewline(t *testing.T) {
+	data := "alpha beta\ngamma delta\nepsilon zeta"
+	cfg := newTestConfig(t, data)
+	cfg.StartOffset = int64(strings.Index(data, "epsilon"))
+	cfg.EndOffset = int64(len(data))
+
+	intermediateData, err := processSplit(cfg)
+	if err != nil {
+		t.Fatalf("process split returned an error: %v", err)
+	}
+
+	for _, key := range []string{"epsilon", "zeta"} {
+		if _, exists := intermediateData[key]; !exists {
+			t.Fatalf("expected key %q to exist", key)
+		}
+	}
+	for _, key := range []string{"alpha", "beta", "gamma", "delta"} {
+		if _, exists := intermediateData[key]; exists {
+			t.Fatalf("expected key %q to be excluded from the last split", key)
+		}
+	}
+}
+
+func TestProcessSplitWritesIntermediateFilesToDisk(t *testing.T) {
+	cfg := newTestConfig(t, "apple kiwi\nmango kiwi\n")
+
+	intermediateData, err := processSplit(cfg)
+	if err != nil {
+		t.Fatalf("process split returned an error: %v", err)
 	}
 
 	expectedByPartition := map[int][]string{}
@@ -98,7 +157,7 @@ func TestProcessFilesWritesIntermediateFilesToDisk(t *testing.T) {
 		partitionPath := filepath.Join(cfg.OutputDir, fmt.Sprintf("partition-%d", partition))
 		data, err := os.ReadFile(partitionPath)
 		if err != nil {
-			t.Fatalf("failed to read partition file %s: %v", partitionPath, err)
+			t.Fatalf("reading partition file %s failed: %v", partitionPath, err)
 		}
 
 		content := strings.TrimSpace(string(data))
@@ -109,24 +168,22 @@ func TestProcessFilesWritesIntermediateFilesToDisk(t *testing.T) {
 
 		expected := expectedByPartition[partition]
 		if len(got) != len(expected) {
-			t.Fatalf("partition %d: expected %d lines, got %d; contents=%q", partition, len(expected), len(got), string(data))
+			t.Fatalf("expected %d lines in partition %d, got %d", len(expected), partition, len(got))
 		}
-
 		for i := range expected {
 			if got[i] != expected[i] {
-				t.Fatalf("partition %d: expected line %d to be %q, got %q", partition, i, expected[i], got[i])
+				t.Fatalf("expected line %d in partition %d to be %q, got %q", i, partition, expected[i], got[i])
 			}
 		}
 	}
 }
 
-func TestProcessFilesCreatesOutputDirWhenMissing(t *testing.T) {
-	cfg := NewTestConfig()
+func TestProcessSplitCreatesOutputDirWhenMissing(t *testing.T) {
+	cfg := newTestConfig(t, "apple kiwi\n")
 	cfg.OutputDir = filepath.Join(t.TempDir(), "nested", "mapper-output")
-	cfg.RegisterFn(&TestMapper{})
 
-	if _, err := processFiles(cfg); err != nil {
-		t.Fatalf("processFiles returned an error: %v", err)
+	if _, err := processSplit(cfg); err != nil {
+		t.Fatalf("process split returned an error: %v", err)
 	}
 
 	for partition := 0; partition < cfg.NumReducers; partition++ {
@@ -137,14 +194,12 @@ func TestProcessFilesCreatesOutputDirWhenMissing(t *testing.T) {
 	}
 }
 
-func TestProcessFilesRejectsInvalidReducerCount(t *testing.T) {
-	cfg := NewTestConfig()
-	cfg.OutputDir = t.TempDir()
+func TestProcessSplitRejectsInvalidReducerCount(t *testing.T) {
+	cfg := newTestConfig(t, "apple kiwi\n")
 	cfg.NumReducers = 0
-	cfg.RegisterFn(&TestMapper{})
 
-	_, err := processFiles(cfg)
+	_, err := processSplit(cfg)
 	if err == nil {
-		t.Fatal("expected processFiles to fail when NumReducers is zero")
+		t.Fatal("expected process split to fail when num reducers is zero")
 	}
 }

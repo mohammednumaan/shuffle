@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -24,115 +25,139 @@ func (em *Emitter) Emit(key, value string) error {
 	if em == nil {
 		return errors.New("emitter is nil")
 	}
+
 	if em.intermediatePairs == nil {
 		return errors.New("intermediate pairs map is nil")
 	}
+
 	em.intermediatePairs[key] = append(em.intermediatePairs[key], value)
 	return nil
 }
 
 func Run(cfg *config.Config) {
-	// first i need to make sure
-	// the output directory is created to storet the key-value pairs
-	if err := os.MkdirAll(cfg.OutputDir, 0777); err != nil {
-		log.Fatalf("Creating directory %s failed: %v", cfg.OutputDir, err)
+	if err := validateMapperConfig(cfg); err != nil {
+		log.Fatalf("invalid mapper config: %v", err)
 	}
-	// then i can safely process files
-	processFiles(cfg)
+
+	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
+		log.Fatalf("creating directory %s failed: %v", cfg.OutputDir, err)
+	}
+
+	if _, err := processSplit(cfg); err != nil {
+		log.Fatalf("mapper failed: %v", err)
+	}
 }
 
-func processFiles(cfg *config.Config) (map[string][]string, error) {
+func validateMapperConfig(cfg *config.Config) error {
 	if cfg == nil {
-		return nil, errors.New("config is nil")
+		return errors.New("config is nil")
 	}
 
-	inputDir := cfg.InputDir
-	startAndEndFiles := strings.Split(cfg.FilePartition, ",")
-
-	if len(startAndEndFiles) != 2 {
-		fmt.Printf("Invalid file partition %q: expected format startFile,endFile\n", cfg.FilePartition)
-		return nil, errors.New("invalid file partition format")
+	if cfg.InputFile == "" {
+		return errors.New("input file is required")
 	}
 
-	// todo: add proper validation for this
-	startFile := startAndEndFiles[0]
-	endFile := startAndEndFiles[1]
+	if cfg.OutputDir == "" {
+		return errors.New("output dir is required")
+	}
 
-	entries, err := os.ReadDir(inputDir)
-	if err != nil {
-		fmt.Printf("Error reading input directory: %v\n", err)
+	if cfg.EndOffset < cfg.StartOffset {
+		return errors.New("end offset must be greater than or equal to start offset")
+	}
+
+	if cfg.Mapper == nil {
+		return errors.New("mapper is nil")
+	}
+
+	return nil
+}
+
+func processSplit(cfg *config.Config) (map[string][]string, error) {
+	if err := validateMapperConfig(cfg); err != nil {
 		return nil, err
 	}
 
-	// this is the in-memory buffer the paper talks about
-	// the intermediate key-value pairs emitted by the user-defined map fn will
-	// be stored in this "buffer"
 	intermediatePairs := make(map[string][]string)
-	emit := &Emitter{
-		intermediatePairs: intermediatePairs,
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		filename := entry.Name()
+	emit := &Emitter{intermediatePairs: intermediatePairs}
 
-		if filename >= startFile && filename <= endFile {
-			filePath := filepath.Join(inputDir, filename)
-			processFile(cfg, filePath, emit)
-		}
+	if err := processFileSplit(cfg, emit); err != nil {
+		return nil, err
 	}
 
-	// after the key-avlue pairs are generated, i need to write the to disk
-	// its partitioned into R files containing the data we need
 	if err := writeIntermediatePairsToDisk(cfg, intermediatePairs, cfg.OutputDir); err != nil {
 		return nil, err
 	}
-	return intermediatePairs, nil
 
+	return intermediatePairs, nil
 }
 
-func processFile(cfg *config.Config, filePath string, emit types.Emitter) {
-	if cfg.Mapper == nil {
-		fmt.Printf("No mapper registered for file %s\n", filePath)
-		return
+func processFileSplit(cfg *config.Config, emit types.Emitter) error {
+	file, err := os.Open(cfg.InputFile)
+	if err != nil {
+		return fmt.Errorf("opening input file: %w", err)
 	}
 
-	file, err := os.Open(filePath)
-	if err != nil {
-		fmt.Printf("Error opening file %s: %v\n", filePath, err)
-		return
-	}
 	defer file.Close()
 
-	// the mapper should do something like this:
-	// Map(k1, v1) -> list(k2, v2)
-	// where k1 is some input key and v1 is the corresponding value.
-	// the user defined map function will take k1 and v1 as input and produce a list of intermediate key-value pairs (k2, v2) which i can add to my in-memory list
-	scanner := bufio.NewScanner(file)
-	lineNumber := 0
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		cfg.Mapper.Map(strconv.Itoa(lineNumber), line, emit)
-		lineNumber++
+	if _, err := file.Seek(cfg.StartOffset, io.SeekStart); err != nil {
+		return fmt.Errorf("seeking to offset %d: %w", cfg.StartOffset, err)
 	}
-	if err := scanner.Err(); err != nil {
-		fmt.Printf("Error scanning file %s: %v\n", filePath, err)
+
+	reader := bufio.NewReader(file)
+	currentOffset := cfg.StartOffset
+
+	if cfg.StartOffset > 0 {
+		previousByte := make([]byte, 1)
+		if _, err := file.ReadAt(previousByte, cfg.StartOffset-1); err != nil {
+			return fmt.Errorf("reading byte before start offset: %w", err)
+		}
+
+		if previousByte[0] != '\n' {
+			discarded, err := reader.ReadString('\n')
+			currentOffset += int64(len(discarded))
+
+			if err != nil && !errors.Is(err, io.EOF) {
+				return fmt.Errorf("skipping partial line: %w", err)
+			}
+
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+		}
+	}
+
+	for {
+		recordStart := currentOffset
+		line, err := reader.ReadString('\n')
+		currentOffset += int64(len(line))
+
+		line = strings.TrimSuffix(line, "\n")
+		if line != "" && recordStart < cfg.EndOffset {
+			cfg.Mapper.Map(strconv.FormatInt(recordStart, 10), line, emit)
+		}
+
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+
+		if err != nil {
+			return fmt.Errorf("reading line: %w", err)
+		}
+
+		if currentOffset >= cfg.EndOffset {
+			return nil
+		}
 	}
 }
 
 func writeIntermediatePairsToDisk(cfg *config.Config, intermediatePairs map[string][]string, outputDir string) error {
-	// the output path is in this format
-	// nfs_path/jobid/mapperId
-	// according to the paper, i need to partition this into R "regions" or files
-	// so i need to define a "partition function"
 	numPartitions := cfg.NumReducers
 	if numPartitions <= 0 {
 		return errors.New("num reducers must be greater than zero")
 	}
-	if err := os.MkdirAll(outputDir, 0777); err != nil {
-		return fmt.Errorf("failed to create output dir %s: %w", outputDir, err)
+
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return fmt.Errorf("creating output dir %s: %w", outputDir, err)
 	}
 
 	keys := make([]string, 0, len(intermediatePairs))
@@ -150,12 +175,11 @@ func writeIntermediatePairsToDisk(cfg *config.Config, intermediatePairs map[stri
 
 		file, err := os.OpenFile(fileName, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 		if err != nil {
-			return fmt.Errorf("failed to open file %s: %w", fileName, err)
+			return fmt.Errorf("opening file %s: %w", fileName, err)
 		}
 
 		files = append(files, file)
-		writer := bufio.NewWriter(file)
-		writers = append(writers, writer)
+		writers = append(writers, bufio.NewWriter(file))
 	}
 
 	for _, key := range keys {
@@ -165,14 +189,15 @@ func writeIntermediatePairsToDisk(cfg *config.Config, intermediatePairs map[stri
 		}
 	}
 
-	for i, writer := range writers {
+	for _, writer := range writers {
 		if err := writer.Flush(); err != nil {
-			return fmt.Errorf("failed to flush partition-%d: %w", i, err)
+			return fmt.Errorf("flushing writer: %w", err)
 		}
 	}
-	for i, file := range files {
+
+	for _, file := range files {
 		if err := file.Close(); err != nil {
-			return fmt.Errorf("failed to close partition-%d: %w", i, err)
+			return fmt.Errorf("closing file: %w", err)
 		}
 	}
 
@@ -183,7 +208,7 @@ func writeToFile(writer *bufio.Writer, key string, values []string) error {
 	for _, value := range values {
 		_, err := writer.WriteString(fmt.Sprintf("%s,%s\n", key, value))
 		if err != nil {
-			return fmt.Errorf("failed to write key %q: %w", key, err)
+			return fmt.Errorf("writing key %q: %w", key, err)
 		}
 	}
 	return nil
@@ -191,16 +216,15 @@ func writeToFile(writer *bufio.Writer, key string, values []string) error {
 
 func getPartition(key string, numPartitions int) int {
 	if numPartitions <= 0 {
-		log.Fatalf("numPartitions must be greater than zero")
+		log.Fatalf("num partitions must be greater than zero")
 	}
-	// this is a simple mod-based hash genration
-	// hFn(key) -> hash(key) % bounds (in this case numPartitions)
+
 	h := fnv.New32a()
 	_, err := h.Write([]byte(key))
 	if err != nil {
-		log.Fatalf("Error calculating hash: %v", err)
+		log.Fatalf("calculating hash failed: %v", err)
 	}
+
 	hashValue := h.Sum32()
 	return int(hashValue % uint32(numPartitions))
-
 }
