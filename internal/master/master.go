@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -53,7 +54,7 @@ func Run(cfg *config.Config, jobId string) {
 	}
 
 	master := NewMaster(jobId)
-	partitions, err := BuildInputSplits(cfg.InputDir, cfg.SplitSizeMB*1024*1024)
+	partitions, err := BuildInputSplitsForMappers(cfg.InputDir, cfg.NumMappers)
 
 	if err != nil {
 		log.Fatalf("splitting input files failed: %v", err)
@@ -143,6 +144,72 @@ func BuildInputSplits(inputDir string, splitSizeByte int64) ([]types.InputSplit,
 	return splits, nil
 }
 
+func BuildInputSplitsForMappers(inputDir string, numMappers int) ([]types.InputSplit, error) {
+	if numMappers <= 0 {
+		return nil, errors.New("num mappers must be greater than zero")
+	}
+
+	entries, err := os.ReadDir(inputDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read input directory: %w", err)
+	}
+
+	var filePaths []string
+	var totalSize int64
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		filePath := filepath.Join(inputDir, entry.Name())
+		fileInfo, err := os.Stat(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to stat file %s: %w", filePath, err)
+		}
+
+		if fileInfo.Size() == 0 {
+			continue
+		}
+
+		filePaths = append(filePaths, filePath)
+		totalSize += fileInfo.Size()
+	}
+
+	if totalSize == 0 {
+		return []types.InputSplit{}, nil
+	}
+
+	targetSplitSize := int64(math.Ceil(float64(totalSize) / float64(numMappers)))
+	if targetSplitSize <= 0 {
+		targetSplitSize = 1
+	}
+
+	var splits []types.InputSplit
+	for _, filePath := range filePaths {
+		fileInfo, err := os.Stat(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to stat file %s: %w", filePath, err)
+		}
+
+		fileSize := fileInfo.Size()
+		for start := int64(0); start < fileSize; start += targetSplitSize {
+			end := start + targetSplitSize
+			if end > fileSize {
+				end = fileSize
+			}
+
+			splits = append(splits, types.InputSplit{
+				FilePath:    filePath,
+				StartOffset: start,
+				EndOffset:   end,
+			})
+		}
+	}
+
+	return splits, nil
+}
+
 func createKubernetsCluster(cfg *config.Config) *kubernetes.Clientset {
 	kubeconfig := cfg.Kubeconfig
 	if kubeconfig == "" {
@@ -197,7 +264,7 @@ func launchReducerWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.
 		reducerId := fmt.Sprintf("%s-reducer-%d", jobId, i)
 
 		taskId := uuid.New().String()
-		outputPath := filepath.Join(cfg.NfsPath, jobId)
+		outputPath := filepath.Join(cfg.NfsPath, jobId, "output")
 
 		task := types.Task{
 			Id:             taskId,
@@ -255,6 +322,31 @@ func waitForMappersToComplete(mt *Master, clientset *kubernetes.Clientset) error
 		}
 
 		log.Printf("mapper task statuses: %+v", mt.MapTasks)
+
+		if allTasksCompleted {
+			return nil
+		}
+
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func waitForReducersToComplete(mt *Master, clientset *kubernetes.Clientset) error {
+	for {
+		allTasksCompleted := true
+		for i := range mt.ReduceTasks {
+			updateTaskProgress(&mt.ReduceTasks[i], clientset)
+			switch mt.ReduceTasks[i].Status {
+			case types.Completed:
+				continue
+			case types.Failed:
+				return fmt.Errorf("reducer task %s assigned to %s failed", mt.ReduceTasks[i].Id, mt.ReduceTasks[i].AssignedWorker)
+			default:
+				allTasksCompleted = false
+			}
+		}
+
+		log.Printf("reducer task statuses: %+v", mt.ReduceTasks)
 
 		if allTasksCompleted {
 			return nil

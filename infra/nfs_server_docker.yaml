@@ -1,14 +1,16 @@
 services:
-  container:
-    image: alpine
+  master:
+    image: mohammednumaan/shuffle:latest
     volumes:
-      - nfs_vol:/mnt/nfs
-    command: sh -c "touch /mnt/nfs/file_from_docker && sleep 3600"
-
-volumes:
-  nfs_vol:
-    driver: local
-    driver_opts:
-      type: nfs
-      o: "addr=127.0.0.1,vers=4,soft"
-      device: ":/data/nfs_storage"
+      - /data/nfs_storage:/mnt/nfs
+      - /home/numaan/.kube/config:/root/.kube/config:ro
+      - /home/numaan/.minikube:/home/numaan/.minikube:ro
+    command:
+      - --mode=master
+      - --input-dir=/mnt/nfs/input
+      - --nfs-path=/mnt/nfs
+      - --num-mappers=8
+      - --split-size-mb=1
+      - --num-reducers=4
+      - --image=mohammednumaan/shuffle:latest
+      - --kubeconfig=/root/.kube/config

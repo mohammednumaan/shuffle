@@ -78,11 +78,20 @@ func TestReducer(t *testing.T) {
 		t.Fatalf("reading reducer output failed: %v", err)
 	}
 
-	got := strings.TrimSpace(string(data))
-	expected := "apple,2\nbanana,1\ncarrot,1"
+	records := strings.Split(strings.TrimSpace(string(data)), "\n")
+	expected := []string{
+		`{"key":"apple","value":"2"}`,
+		`{"key":"banana","value":"1"}`,
+		`{"key":"carrot","value":"1"}`,
+	}
 
-	if got != expected {
-		t.Fatalf("expected reducer output:\n%s\n\ngot:\n%s", expected, got)
+	if len(records) != len(expected) {
+		t.Fatalf("expected %d output records, got %d", len(expected), len(records))
+	}
+	for i := range expected {
+		if records[i] != expected[i] {
+			t.Fatalf("expected reducer output line %d to be %s, got %s", i, expected[i], records[i])
+		}
 	}
 }
 
@@ -125,7 +134,7 @@ func TestRunOnlyProcessesAssignedPartition(t *testing.T) {
 	}
 
 	got := strings.TrimSpace(string(data))
-	expected := "apple,1"
+	expected := `{"key":"apple","value":"1"}`
 	if got != expected {
 		t.Fatalf("expected reducer output:\n%s\n\ngot:\n%s", expected, got)
 	}
@@ -160,7 +169,7 @@ func TestReducerReadsJSONEncodedSpecialCharacters(t *testing.T) {
 	}
 
 	got := strings.TrimSpace(string(data))
-	expected := "alpha,beta,2"
+	expected := `{"key":"alpha,beta","value":"2"}`
 	if got != expected {
 		t.Fatalf("expected reducer output:\n%s\n\ngot:\n%s", expected, got)
 	}

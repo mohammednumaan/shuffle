@@ -116,6 +116,7 @@ func writeReducerOutput(cfg *config.Config, groupedData map[string][]string) err
 	defer file.Close()
 
 	writer := bufio.NewWriter(file)
+	encoder := json.NewEncoder(writer)
 
 	keys := make([]string, 0, len(groupedData))
 	for key := range groupedData {
@@ -131,9 +132,8 @@ func writeReducerOutput(cfg *config.Config, groupedData map[string][]string) err
 			return fmt.Errorf("reducing key %s failed: %w", key, err)
 		}
 
-		line := fmt.Sprintf("%s,%s\n", key, res)
-		if _, err := writer.WriteString(line); err != nil {
-			return fmt.Errorf("writing output line failed: %w", err)
+		if err := encoder.Encode(types.IntermediateRecord{Key: key, Value: res}); err != nil {
+			return fmt.Errorf("encoding reducer output failed: %w", err)
 		}
 	}
 
