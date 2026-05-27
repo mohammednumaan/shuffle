@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,23 +14,25 @@ import (
 	"github.com/mohammednumaan/shuffle/internal/types"
 )
 
-func Run(cfg *config.Config) {
+func Run(cfg *config.Config) error {
 	if err := validateReducerConfig(cfg); err != nil {
-		log.Fatalf("invalid reducer config: %v", err)
+		return fmt.Errorf("reducer config: %w", err)
 	}
 
 	groupedData, err := collectPartitionData(cfg.InputDir, cfg.ReducerIdx)
 	if err != nil {
-		log.Fatalf("collecting partition data failed: %v", err)
+		return fmt.Errorf("collecting partition data: %w", err)
 	}
 
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
-		log.Fatalf("creating output directory failed: %v", err)
+		return fmt.Errorf("output dir %s: %w", cfg.OutputDir, err)
 	}
 
 	if err := writeReducerOutput(cfg, groupedData); err != nil {
-		log.Fatalf("writing reducer output failed: %v", err)
+		return err
 	}
+
+	return nil
 }
 
 func validateReducerConfig(cfg *config.Config) error {
@@ -96,9 +97,9 @@ func readPartitionFile(filePath string, grouped map[string][]string) error {
 
 	decoder := json.NewDecoder(bufio.NewReader(file))
 	for {
-		var record types.IntermediateRecord
+		var record types.KeyValue[string, string]
 		if err := decoder.Decode(&record); err != nil {
-			if errors.Is(err, io.EOF) {
+			if err == io.EOF {
 				return nil
 			}
 			return fmt.Errorf("decoding partition file failed: %w", err)
@@ -132,7 +133,7 @@ func writeReducerOutput(cfg *config.Config, groupedData map[string][]string) err
 			return fmt.Errorf("reducing key %s failed: %w", key, err)
 		}
 
-		if err := encoder.Encode(types.IntermediateRecord{Key: key, Value: res}); err != nil {
+		if err := encoder.Encode(types.KeyValue[string, string]{Key: key, Value: res}); err != nil {
 			return fmt.Errorf("encoding reducer output failed: %w", err)
 		}
 	}

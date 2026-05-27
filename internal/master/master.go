@@ -41,13 +41,16 @@ func NewMaster(jobId string) *Master {
 	}
 }
 
-func Run(cfg *config.Config, jobId string) {
+func Run(cfg *config.Config, jobId string) error {
 	if err := validateMasterConfig(cfg); err != nil {
-		log.Fatalf("invalid master config: %v", err)
+		return fmt.Errorf("master config: %w", err)
 	}
 
 	clientset := createKubernetsCluster(cfg)
-	numOfNodes := getNumOfNodes(clientset)
+	numOfNodes, err := getNumOfNodes(clientset)
+	if err != nil {
+		return fmt.Errorf("getting nodes: %w", err)
+	}
 
 	if numOfNodes < cfg.NumMappers {
 		log.Printf("warning: number of mappers (%d) is greater than number of nodes (%d)", cfg.NumMappers, numOfNodes)
@@ -55,20 +58,26 @@ func Run(cfg *config.Config, jobId string) {
 
 	master := NewMaster(jobId)
 	partitions, err := BuildInputSplitsForMappers(cfg.InputDir, cfg.NumMappers)
-
 	if err != nil {
-		log.Fatalf("splitting input files failed: %v", err)
+		return fmt.Errorf("building input splits: %w", err)
 	}
 	log.Printf("input splits: %+v", partitions)
-	launchMapperWorkers(master, cfg, clientset, partitions)
+
+	if err := launchMapperWorkers(master, cfg, clientset, partitions); err != nil {
+		return fmt.Errorf("launching mapper workers: %w", err)
+	}
 	if err := waitForMappersToComplete(master, clientset); err != nil {
-		log.Fatalf("mapper phase failed: %v", err)
+		return fmt.Errorf("mapper phase: %w", err)
 	}
 
-	launchReducerWorkers(master, cfg, clientset)
-	if err := waitForReducersToComplete(master, clientset); err != nil {
-		log.Fatalf("reducer phase failed: %v", err)
+	if err := launchReducerWorkers(master, cfg, clientset); err != nil {
+		return fmt.Errorf("launching reducer workers: %w", err)
 	}
+	if err := waitForReducersToComplete(master, clientset); err != nil {
+		return fmt.Errorf("reducer phase: %w", err)
+	}
+
+	return nil
 }
 
 func validateMasterConfig(cfg *config.Config) error {
@@ -97,12 +106,12 @@ func validateMasterConfig(cfg *config.Config) error {
 	return nil
 }
 
-func getNumOfNodes(clientset *kubernetes.Clientset) int {
+func getNumOfNodes(clientset *kubernetes.Clientset) (int, error) {
 	nodes, err := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
-		log.Fatalf("Error fetching nodes: %v", err)
+		return 0, fmt.Errorf("fetching nodes: %w", err)
 	}
-	return len(nodes.Items)
+	return len(nodes.Items), nil
 }
 
 func BuildInputSplits(inputDir string, splitSizeByte int64) ([]types.InputSplit, error) {
@@ -112,7 +121,7 @@ func BuildInputSplits(inputDir string, splitSizeByte int64) ([]types.InputSplit,
 
 	entries, err := os.ReadDir(inputDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read input directory: %w", err)
+		return nil, fmt.Errorf("reading input directory: %w", err)
 	}
 
 	var splits []types.InputSplit
@@ -124,7 +133,7 @@ func BuildInputSplits(inputDir string, splitSizeByte int64) ([]types.InputSplit,
 		filePath := filepath.Join(inputDir, entry.Name())
 		fileInfo, err := os.Stat(filePath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to stat file %s: %w", filePath, err)
+			return nil, fmt.Errorf("stating file %s: %w", filePath, err)
 		}
 
 		fileSize := fileInfo.Size()
@@ -151,7 +160,7 @@ func BuildInputSplitsForMappers(inputDir string, numMappers int) ([]types.InputS
 
 	entries, err := os.ReadDir(inputDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read input directory: %w", err)
+		return nil, fmt.Errorf("read input directory: %w", err)
 	}
 
 	var filePaths []string
@@ -165,7 +174,7 @@ func BuildInputSplitsForMappers(inputDir string, numMappers int) ([]types.InputS
 		filePath := filepath.Join(inputDir, entry.Name())
 		fileInfo, err := os.Stat(filePath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to stat file %s: %w", filePath, err)
+			return nil, fmt.Errorf("stat file %s: %w", filePath, err)
 		}
 
 		if fileInfo.Size() == 0 {
@@ -189,7 +198,7 @@ func BuildInputSplitsForMappers(inputDir string, numMappers int) ([]types.InputS
 	for _, filePath := range filePaths {
 		fileInfo, err := os.Stat(filePath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to stat file %s: %w", filePath, err)
+			return nil, fmt.Errorf("stat file %s: %w", filePath, err)
 		}
 
 		fileSize := fileInfo.Size()
@@ -231,7 +240,7 @@ func createKubernetsCluster(cfg *config.Config) *kubernetes.Clientset {
 	return clientset
 }
 
-func launchMapperWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.Clientset, inputSplits []types.InputSplit) {
+func launchMapperWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.Clientset, inputSplits []types.InputSplit) error {
 	for i := 0; i < len(inputSplits); i++ {
 		jobId := mt.JobId
 		mapperId := fmt.Sprintf("%s-mapper-%d", jobId, i)
@@ -239,12 +248,9 @@ func launchMapperWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.C
 
 		outputPath := filepath.Join(cfg.NfsPath, jobId, mapperId)
 		task := types.Task{
-			Id:             taskId,
-			Type:           types.MapTask,
-			Status:         types.Pending,
-			Split:          inputSplits[i],
-			AssignedWorker: mapperId,
-			OutputPath:     outputPath,
+			Id:     taskId,
+			Type:   types.MapTask,
+			Status: types.Idle,
 		}
 		mt.MapTasks = append(mt.MapTasks, task)
 
@@ -252,13 +258,14 @@ func launchMapperWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.C
 		_, err := clientset.BatchV1().Jobs("default").Create(context.TODO(), job, metav1.CreateOptions{})
 
 		if err != nil {
-			log.Printf("creating job for mapper %s failed: %v", mapperId, err)
-			os.Exit(1)
+			return fmt.Errorf("creating job for mapper %s: %w", mapperId, err)
 		}
 	}
+
+	return nil
 }
 
-func launchReducerWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.Clientset) {
+func launchReducerWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.Clientset) error {
 	for i := 0; i < cfg.NumReducers; i++ {
 		jobId := mt.JobId
 		reducerId := fmt.Sprintf("%s-reducer-%d", jobId, i)
@@ -267,11 +274,9 @@ func launchReducerWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.
 		outputPath := filepath.Join(cfg.NfsPath, jobId, "output")
 
 		task := types.Task{
-			Id:             taskId,
-			Type:           types.ReduceTask,
-			Status:         types.Pending,
-			AssignedWorker: reducerId,
-			OutputPath:     outputPath,
+			Id:     taskId,
+			Type:   types.ReduceTask,
+			Status: types.Idle,
 		}
 
 		mt.ReduceTasks = append(mt.ReduceTasks, task)
@@ -279,10 +284,11 @@ func launchReducerWorkers(mt *Master, cfg *config.Config, clientset *kubernetes.
 
 		_, err := clientset.BatchV1().Jobs("default").Create(context.TODO(), job, metav1.CreateOptions{})
 		if err != nil {
-			log.Printf("creating job for reducer %s failed: %v", reducerId, err)
-			os.Exit(1)
+			return fmt.Errorf("creating job for reducer %s: %w", reducerId, err)
 		}
 	}
+
+	return nil
 }
 
 func updateTaskProgress(task *types.Task, clientset *kubernetes.Clientset) {
@@ -300,9 +306,9 @@ func updateTaskProgress(task *types.Task, clientset *kubernetes.Clientset) {
 	case job.Status.Failed > 0:
 		task.Status = types.Failed
 	case job.Status.Active > 0:
-		task.Status = types.Running
+		task.Status = types.InProgress
 	default:
-		task.Status = types.Pending
+		task.Status = types.Idle
 	}
 }
 

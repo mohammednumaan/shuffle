@@ -18,7 +18,7 @@ func (tr *testReducer) Reduce(key string, values []string) (string, error) {
 	return fmt.Sprintf("%d", len(values)), nil
 }
 
-func createPartitionRecords(t *testing.T, path string, records []types.IntermediateRecord) {
+func createPartitionRecords(t *testing.T, path string, records []types.KeyValue[string, string]) {
 	t.Helper()
 
 	file, err := os.Create(path)
@@ -47,17 +47,17 @@ func TestReducer(t *testing.T) {
 		t.Fatalf("creating worker-1 dir failed: %v", err)
 	}
 
-	createPartitionRecords(t, filepath.Join(worker0, "partition-1"), []types.IntermediateRecord{
+	createPartitionRecords(t, filepath.Join(worker0, "partition-1"), []types.KeyValue[string, string]{
 		{Key: "apple", Value: "1"},
 		{Key: "banana", Value: "1"},
 	})
 
-	createPartitionRecords(t, filepath.Join(worker1, "partition-1"), []types.IntermediateRecord{
+	createPartitionRecords(t, filepath.Join(worker1, "partition-1"), []types.KeyValue[string, string]{
 		{Key: "apple", Value: "1"},
 		{Key: "carrot", Value: "1"},
 	})
 
-	createPartitionRecords(t, filepath.Join(worker1, "partition-0"), []types.IntermediateRecord{
+	createPartitionRecords(t, filepath.Join(worker1, "partition-0"), []types.KeyValue[string, string]{
 		{Key: "mango", Value: "1"},
 	})
 
@@ -108,11 +108,11 @@ func TestRunOnlyProcessesAssignedPartition(t *testing.T) {
 		t.Fatalf("creating worker-1 dir failed: %v", err)
 	}
 
-	createPartitionRecords(t, filepath.Join(worker0, "partition-1"), []types.IntermediateRecord{
+	createPartitionRecords(t, filepath.Join(worker0, "partition-1"), []types.KeyValue[string, string]{
 		{Key: "apple", Value: "1"},
 	})
 
-	createPartitionRecords(t, filepath.Join(worker1, "partition-0"), []types.IntermediateRecord{
+	createPartitionRecords(t, filepath.Join(worker1, "partition-0"), []types.KeyValue[string, string]{
 		{Key: "banana", Value: "1"},
 	})
 
@@ -147,7 +147,7 @@ func TestReducerReadsJSONEncodedSpecialCharacters(t *testing.T) {
 		t.Fatalf("creating worker-0 dir failed: %v", err)
 	}
 
-	createPartitionRecords(t, filepath.Join(worker0, "partition-0"), []types.IntermediateRecord{
+	createPartitionRecords(t, filepath.Join(worker0, "partition-0"), []types.KeyValue[string, string]{
 		{Key: "alpha,beta", Value: "first\nline"},
 		{Key: "alpha,beta", Value: "second"},
 	})

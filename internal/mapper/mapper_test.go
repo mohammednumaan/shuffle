@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 
@@ -17,19 +16,19 @@ import (
 type testMapper struct{}
 type testReducer struct{}
 
-func (tm *testMapper) Map(key string, value string, emit types.Emitter) {
+func (tm *testMapper) Map(key string, value string) []types.KeyValue[string, string] {
+	var kvs []types.KeyValue[string, string]
 	for _, word := range strings.Fields(value) {
-		if err := emit.Emit(word, "1"); err != nil {
-			return
-		}
+		kvs = append(kvs, types.KeyValue[string, string]{Key: word, Value: "1"})
 	}
+	return kvs
 }
 
 func (tr *testReducer) Reduce(key string, values []string) (string, error) {
 	return fmt.Sprintf("%d", len(values)), nil
 }
 
-func decodePartitionRecords(t *testing.T, path string) []types.IntermediateRecord {
+func decodePartitionRecords(t *testing.T, path string) []types.KeyValue[string, string] {
 	t.Helper()
 
 	file, err := os.Open(path)
@@ -39,9 +38,9 @@ func decodePartitionRecords(t *testing.T, path string) []types.IntermediateRecor
 	defer file.Close()
 
 	decoder := json.NewDecoder(file)
-	var records []types.IntermediateRecord
+	var records []types.KeyValue[string, string]
 	for {
-		var record types.IntermediateRecord
+		var record types.KeyValue[string, string]
 		if err := decoder.Decode(&record); err != nil {
 			if err == io.EOF {
 				break
@@ -74,14 +73,23 @@ func newTestConfig(t *testing.T, data string) *config.Config {
 	return cfg
 }
 
+func groupByKey(kvs []types.KeyValue[string, string]) map[string][]string {
+	grouped := make(map[string][]string)
+	for _, kv := range kvs {
+		grouped[kv.Key] = append(grouped[kv.Key], kv.Value)
+	}
+	return grouped
+}
+
 func TestProcessSplitReadsWholeFile(t *testing.T) {
 	cfg := newTestConfig(t, "apple kiwi\nmango kiwi\n")
 
-	intermediateData, err := processSplit(cfg)
+	kvs, err := processSplit(cfg)
 	if err != nil {
 		t.Fatalf("process split returned an error: %v", err)
 	}
 
+	intermediateData := groupByKey(kvs)
 	expected := map[string][]string{
 		"apple": {"1"},
 		"kiwi":  {"1", "1"},
@@ -105,11 +113,12 @@ func TestProcessFileSplitSkipsPartialFirstLine(t *testing.T) {
 	cfg.StartOffset = int64(strings.Index(data, "beta"))
 	cfg.EndOffset = int64(len(data))
 
-	intermediateData, err := processSplit(cfg)
+	kvs, err := processSplit(cfg)
 	if err != nil {
 		t.Fatalf("process split returned an error: %v", err)
 	}
 
+	intermediateData := groupByKey(kvs)
 	if _, exists := intermediateData["alpha"]; exists {
 		t.Fatal("expected first partial line to be skipped")
 	}
@@ -125,11 +134,12 @@ func TestProcessFileSplitStopsAfterCrossingEndOffset(t *testing.T) {
 	cfg := newTestConfig(t, data)
 	cfg.EndOffset = int64(strings.Index(data, "epsilon"))
 
-	intermediateData, err := processSplit(cfg)
+	kvs, err := processSplit(cfg)
 	if err != nil {
 		t.Fatalf("process split returned an error: %v", err)
 	}
 
+	intermediateData := groupByKey(kvs)
 	if _, exists := intermediateData["epsilon"]; exists {
 		t.Fatal("expected records starting at or after the end offset to be excluded")
 	}
@@ -146,11 +156,12 @@ func TestProcessFileSplitDoesNotSkipLineIfStartOffsetIsAtValidLine(t *testing.T)
 	cfg.StartOffset = int64(strings.Index(data, "epsilon"))
 	cfg.EndOffset = int64(len(data))
 
-	intermediateData, err := processSplit(cfg)
+	kvs, err := processSplit(cfg)
 	if err != nil {
 		t.Fatalf("process split returned an error: %v", err)
 	}
 
+	intermediateData := groupByKey(kvs)
 	for _, key := range []string{"epsilon", "zeta"} {
 		if _, exists := intermediateData[key]; !exists {
 			t.Fatalf("expected key %q to exist", key)
@@ -166,26 +177,18 @@ func TestProcessFileSplitDoesNotSkipLineIfStartOffsetIsAtValidLine(t *testing.T)
 func TestProcessSplitWritesIntermediateFilesToDisk(t *testing.T) {
 	cfg := newTestConfig(t, "apple kiwi\nmango kiwi\n")
 
-	intermediateData, err := processSplit(cfg)
+	kvs, err := processSplit(cfg)
 	if err != nil {
 		t.Fatalf("process split returned an error: %v", err)
 	}
 
-	expectedByPartition := map[int][]types.IntermediateRecord{}
-	keys := make([]string, 0, len(intermediateData))
-	for key := range intermediateData {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	for _, key := range keys {
-		partition := getPartition(key, cfg.NumReducers)
-		for _, value := range intermediateData[key] {
-			expectedByPartition[partition] = append(expectedByPartition[partition], types.IntermediateRecord{
-				Key:   key,
-				Value: value,
-			})
+	expectedByPartition := map[int][]types.KeyValue[string, string]{}
+	for _, kv := range kvs {
+		partition, err := getPartition(kv.Key, cfg.NumReducers)
+		if err != nil {
+			t.Fatalf("getPartition failed: %v", err)
 		}
+		expectedByPartition[partition] = append(expectedByPartition[partition], kv)
 	}
 
 	for partition := 0; partition < cfg.NumReducers; partition++ {
@@ -203,15 +206,15 @@ func TestProcessSplitWritesIntermediateFilesToDisk(t *testing.T) {
 	}
 }
 
-func TestWriteIntermediatePairsToDiskUsesJSONLines(t *testing.T) {
+func TestWritePartitionsUsesJSONLines(t *testing.T) {
 	outputDir := t.TempDir()
 	cfg := &config.Config{NumReducers: 1}
-	intermediatePairs := map[string][]string{
-		`alpha,"beta"`: {"line 1\nline 2"},
+	kvs := []types.KeyValue[string, string]{
+		{Key: `alpha,"beta"`, Value: "line 1\nline 2"},
 	}
 
-	if err := writeIntermediatePairsToDisk(cfg, intermediatePairs, outputDir); err != nil {
-		t.Fatalf("writeIntermediatePairsToDisk returned an error: %v", err)
+	if err := writePartitions(cfg, kvs, outputDir); err != nil {
+		t.Fatalf("writePartitions returned an error: %v", err)
 	}
 
 	records := decodePartitionRecords(t, filepath.Join(outputDir, "partition-0"))

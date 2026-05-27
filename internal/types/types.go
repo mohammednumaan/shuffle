@@ -10,10 +10,10 @@ const (
 type TaskStatus string
 
 const (
-	Pending   TaskStatus = "pending"
-	Running   TaskStatus = "running"
-	Completed TaskStatus = "completed"
-	Failed    TaskStatus = "failed"
+	Idle       TaskStatus = "idle"
+	InProgress TaskStatus = "in-progress"
+	Completed  TaskStatus = "completed"
+	Failed     TaskStatus = "failed"
 )
 
 type InputSplit struct {
@@ -31,17 +31,17 @@ type Task struct {
 	OutputPath     string
 }
 
-type IntermediateRecord struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
+type KeyValue[K, V any] struct {
+	Key   K `json:"key"`
+	Value V `json:"value"`
 }
 
-type Emitter interface {
-	Emit(key string, value string) error
-}
+type MapFunc func(string, string) []KeyValue[string, string]
+
+type ReduceFunc func(string, []string) (string, error)
 
 type Mapper interface {
-	Map(key string, value string, emit Emitter)
+	Map(key string, value string) []KeyValue[string, string]
 }
 
 type Reducer interface {

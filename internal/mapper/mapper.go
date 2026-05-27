@@ -7,10 +7,8 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -18,35 +16,16 @@ import (
 	"github.com/mohammednumaan/shuffle/internal/types"
 )
 
-type Emitter struct {
-	intermediatePairs map[string][]string
-}
-
-func (em *Emitter) Emit(key, value string) error {
-	if em == nil {
-		return errors.New("emitter is nil")
-	}
-
-	if em.intermediatePairs == nil {
-		return errors.New("intermediate pairs map is nil")
-	}
-
-	em.intermediatePairs[key] = append(em.intermediatePairs[key], value)
-	return nil
-}
-
-func Run(cfg *config.Config) {
+func Run(cfg *config.Config) error {
 	if err := validateMapperConfig(cfg); err != nil {
-		log.Fatalf("invalid mapper config: %v", err)
-	}
-
-	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
-		log.Fatalf("creating directory %s failed: %v", cfg.OutputDir, err)
+		return fmt.Errorf("mapper config: %w", err)
 	}
 
 	if _, err := processSplit(cfg); err != nil {
-		log.Fatalf("mapper failed: %v", err)
+		return err
 	}
+
+	return nil
 }
 
 func validateMapperConfig(cfg *config.Config) error {
@@ -73,35 +52,33 @@ func validateMapperConfig(cfg *config.Config) error {
 	return nil
 }
 
-func processSplit(cfg *config.Config) (map[string][]string, error) {
+func processSplit(cfg *config.Config) ([]types.KeyValue[string, string], error) {
 	if err := validateMapperConfig(cfg); err != nil {
 		return nil, err
 	}
 
-	intermediatePairs := make(map[string][]string)
-	emit := &Emitter{intermediatePairs: intermediatePairs}
-
-	if err := processFileSplit(cfg, emit); err != nil {
+	kvs, err := processFileSplit(cfg)
+	if err != nil {
 		return nil, err
 	}
 
-	if err := writeIntermediatePairsToDisk(cfg, intermediatePairs, cfg.OutputDir); err != nil {
+	if err := writePartitions(cfg, kvs, cfg.OutputDir); err != nil {
 		return nil, err
 	}
 
-	return intermediatePairs, nil
+	return kvs, nil
 }
 
-func processFileSplit(cfg *config.Config, emit types.Emitter) error {
+func processFileSplit(cfg *config.Config) ([]types.KeyValue[string, string], error) {
 	file, err := os.Open(cfg.InputFile)
 	if err != nil {
-		return fmt.Errorf("opening input file: %w", err)
+		return nil, fmt.Errorf("opening input file: %w", err)
 	}
 
 	defer file.Close()
 
 	if _, err := file.Seek(cfg.StartOffset, io.SeekStart); err != nil {
-		return fmt.Errorf("seeking to offset %d: %w", cfg.StartOffset, err)
+		return nil, fmt.Errorf("seeking to offset %d: %w", cfg.StartOffset, err)
 	}
 
 	reader := bufio.NewReader(file)
@@ -110,23 +87,23 @@ func processFileSplit(cfg *config.Config, emit types.Emitter) error {
 	if cfg.StartOffset > 0 {
 		previousByte := make([]byte, 1)
 		if _, err := file.ReadAt(previousByte, cfg.StartOffset-1); err != nil {
-			return fmt.Errorf("reading byte before start offset: %w", err)
+			return nil, fmt.Errorf("reading byte before start offset: %w", err)
 		}
 
 		if previousByte[0] != '\n' {
 			discarded, err := reader.ReadString('\n')
 			currentOffset += int64(len(discarded))
 
-			if err != nil && !errors.Is(err, io.EOF) {
-				return fmt.Errorf("skipping partial line: %w", err)
-			}
-
-			if errors.Is(err, io.EOF) {
-				return nil
+			if err != nil {
+				if err == io.EOF {
+					return nil, nil
+				}
+				return nil, fmt.Errorf("skipping partial line: %w", err)
 			}
 		}
 	}
 
+	var kvs []types.KeyValue[string, string]
 	for {
 		recordStart := currentOffset
 		line, err := reader.ReadString('\n')
@@ -134,41 +111,35 @@ func processFileSplit(cfg *config.Config, emit types.Emitter) error {
 
 		line = strings.TrimSuffix(line, "\n")
 		if line != "" && recordStart < cfg.EndOffset {
-			cfg.Mapper.Map(strconv.FormatInt(recordStart, 10), line, emit)
+			kvs = append(kvs, cfg.Mapper.Map(strconv.FormatInt(recordStart, 10), line)...)
 		}
 
-		if errors.Is(err, io.EOF) {
-			return nil
+		if err == io.EOF {
+			return kvs, nil
 		}
 
 		if err != nil {
-			return fmt.Errorf("reading line: %w", err)
+			return nil, fmt.Errorf("reading line: %w", err)
 		}
 
 		if currentOffset >= cfg.EndOffset {
-			return nil
+			return kvs, nil
 		}
 	}
 }
 
-func writeIntermediatePairsToDisk(cfg *config.Config, intermediatePairs map[string][]string, outputDir string) error {
+func writePartitions(cfg *config.Config, kvs []types.KeyValue[string, string], outputDir string) error {
 	numPartitions := cfg.NumReducers
 	if numPartitions <= 0 {
 		return errors.New("num reducers must be greater than zero")
 	}
 
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
-		return fmt.Errorf("creating output dir %s: %w", outputDir, err)
+		return fmt.Errorf("output dir %s: %w", outputDir, err)
 	}
 
-	keys := make([]string, 0, len(intermediatePairs))
-	for key := range intermediatePairs {
-		keys = append(keys, key)
-	}
-
-	sort.Strings(keys)
-	writers := make([]*bufio.Writer, 0, numPartitions)
-	files := make([]*os.File, 0, numPartitions)
+	files := make([]*os.File, numPartitions)
+	writers := make([]*bufio.Writer, numPartitions)
 
 	for i := 0; i < numPartitions; i++ {
 		partitionName := fmt.Sprintf("partition-%d", i)
@@ -179,14 +150,17 @@ func writeIntermediatePairsToDisk(cfg *config.Config, intermediatePairs map[stri
 			return fmt.Errorf("opening file %s: %w", fileName, err)
 		}
 
-		files = append(files, file)
-		writers = append(writers, bufio.NewWriter(file))
+		files[i] = file
+		writers[i] = bufio.NewWriter(file)
 	}
 
-	for _, key := range keys {
-		p := getPartition(key, numPartitions)
-		if err := writeToFile(writers[p], key, intermediatePairs[key]); err != nil {
+	for _, kv := range kvs {
+		p, err := getPartition(kv.Key, numPartitions)
+		if err != nil {
 			return err
+		}
+		if err := json.NewEncoder(writers[p]).Encode(kv); err != nil {
+			return fmt.Errorf("encoding key %q: %w", kv.Key, err)
 		}
 	}
 
@@ -205,31 +179,17 @@ func writeIntermediatePairsToDisk(cfg *config.Config, intermediatePairs map[stri
 	return nil
 }
 
-func writeToFile(writer *bufio.Writer, key string, values []string) error {
-	encoder := json.NewEncoder(writer)
-	for _, value := range values {
-		record := types.IntermediateRecord{
-			Key:   key,
-			Value: value,
-		}
-		if err := encoder.Encode(record); err != nil {
-			return fmt.Errorf("encoding key %q: %w", key, err)
-		}
-	}
-	return nil
-}
-
-func getPartition(key string, numPartitions int) int {
+func getPartition(key string, numPartitions int) (int, error) {
 	if numPartitions <= 0 {
-		log.Fatalf("num partitions must be greater than zero")
+		return 0, errors.New("num partitions must be greater than zero")
 	}
 
 	h := fnv.New32a()
 	_, err := h.Write([]byte(key))
 	if err != nil {
-		log.Fatalf("calculating hash failed: %v", err)
+		return 0, fmt.Errorf("calculating hash: %w", err)
 	}
 
 	hashValue := h.Sum32()
-	return int(hashValue % uint32(numPartitions))
+	return int(hashValue % uint32(numPartitions)), nil
 }
