@@ -14,10 +14,11 @@ import (
 
 	"github.com/mohammednumaan/shuffle/internal/config"
 	"github.com/mohammednumaan/shuffle/internal/types"
+	"github.com/mohammednumaan/shuffle/internal/utils"
 )
 
 func Run(cfg *config.Config) error {
-	if err := validateMapperConfig(cfg); err != nil {
+	if err := utils.ValidateMapperConfig(cfg); err != nil {
 		return fmt.Errorf("mapper config: %w", err)
 	}
 
@@ -28,32 +29,8 @@ func Run(cfg *config.Config) error {
 	return nil
 }
 
-func validateMapperConfig(cfg *config.Config) error {
-	if cfg == nil {
-		return errors.New("config is nil")
-	}
-
-	if cfg.InputFile == "" {
-		return errors.New("input file is required")
-	}
-
-	if cfg.OutputDir == "" {
-		return errors.New("output dir is required")
-	}
-
-	if cfg.EndOffset < cfg.StartOffset {
-		return errors.New("end offset must be greater than or equal to start offset")
-	}
-
-	if cfg.Mapper == nil {
-		return errors.New("mapper is nil")
-	}
-
-	return nil
-}
-
 func processSplit(cfg *config.Config) ([]types.KeyValue[string, string], error) {
-	if err := validateMapperConfig(cfg); err != nil {
+	if err := utils.ValidateMapperConfig(cfg); err != nil {
 		return nil, err
 	}
 

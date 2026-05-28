@@ -1,5 +1,7 @@
 package types
 
+import "time"
+
 type TaskType string
 
 const (
@@ -29,6 +31,9 @@ type Task struct {
 	Split          InputSplit
 	AssignedWorker string
 	OutputPath     string
+	RetryCount     int
+	RetryAfter     time.Time
+	MaxRetries     int
 }
 
 type KeyValue[K, V any] struct {

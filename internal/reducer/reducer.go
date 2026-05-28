@@ -12,10 +12,11 @@ import (
 
 	"github.com/mohammednumaan/shuffle/internal/config"
 	"github.com/mohammednumaan/shuffle/internal/types"
+	"github.com/mohammednumaan/shuffle/internal/utils"
 )
 
 func Run(cfg *config.Config) error {
-	if err := validateReducerConfig(cfg); err != nil {
+	if err := utils.ValidateReducerConfig(cfg); err != nil {
 		return fmt.Errorf("reducer config: %w", err)
 	}
 
@@ -32,33 +33,6 @@ func Run(cfg *config.Config) error {
 		return err
 	}
 
-	return nil
-}
-
-func validateReducerConfig(cfg *config.Config) error {
-	if cfg == nil {
-		return errors.New("config is nil")
-	}
-
-	if cfg.InputDir == "" {
-		return errors.New("input dir is required")
-	}
-
-	if cfg.OutputDir == "" {
-		return errors.New("output dir is required")
-	}
-
-	if cfg.NumReducers <= 0 {
-		return errors.New("number of reducers must be greater than 0")
-	}
-
-	if cfg.ReducerIdx < 0 || cfg.ReducerIdx >= cfg.NumReducers {
-		return errors.New("invalid reducer index")
-	}
-
-	if cfg.Reducer == nil {
-		return errors.New("reducer is nil")
-	}
 	return nil
 }
 
