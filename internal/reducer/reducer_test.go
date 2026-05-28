@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mohammednumaan/shuffle/internal/config"
 	"github.com/mohammednumaan/shuffle/internal/types"
 )
 
@@ -62,7 +61,7 @@ func TestReducer(t *testing.T) {
 	})
 
 	outputDir := filepath.Join(t.TempDir(), "output")
-	cfg := &config.Config{
+	cfg := &types.Config{
 		InputDir:    inputDir,
 		OutputDir:   outputDir,
 		NumReducers: 3,
@@ -117,7 +116,7 @@ func TestRunOnlyProcessesAssignedPartition(t *testing.T) {
 	})
 
 	outputDir := filepath.Join(t.TempDir(), "output")
-	cfg := &config.Config{
+	cfg := &types.Config{
 		InputDir:    inputDir,
 		OutputDir:   outputDir,
 		NumReducers: 3,
@@ -153,7 +152,7 @@ func TestReducerReadsJSONEncodedSpecialCharacters(t *testing.T) {
 	})
 
 	outputDir := filepath.Join(t.TempDir(), "output")
-	cfg := &config.Config{
+	cfg := &types.Config{
 		InputDir:    inputDir,
 		OutputDir:   outputDir,
 		NumReducers: 1,

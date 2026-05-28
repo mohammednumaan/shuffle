@@ -2,39 +2,11 @@ package config
 
 import (
 	"flag"
-
 	"github.com/mohammednumaan/shuffle/internal/types"
 )
 
-type Config struct {
-	Mode      string
-	InputDir  string
-	OutputDir string
-
-	InputFile   string
-	StartOffset int64
-	EndOffset   int64
-
-	NumMappers  int
-	NumReducers int
-	SplitSizeMB int64
-
-	NfsPath    string
-	Image      string
-	Kubeconfig string
-
-	Mapper     types.Mapper
-	Reducer    types.Reducer
-	ReducerIdx int
-}
-
-func (cfg *Config) RegisterFn(mapperFn types.Mapper, reducerFn types.Reducer) {
-	cfg.Mapper = mapperFn
-	cfg.Reducer = reducerFn
-}
-
-func SetupJobConfig() *Config {
-	cfg := &Config{}
+func SetupJobConfig() *types.Config {
+	cfg := &types.Config{}
 
 	flag.StringVar(&cfg.Mode, "mode", "", "mode of operation: master, mapper, reducer")
 	flag.StringVar(&cfg.InputDir, "input-dir", "", "path to the input directory")

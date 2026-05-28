@@ -10,13 +10,12 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/mohammednumaan/shuffle/internal/config"
 	"github.com/mohammednumaan/shuffle/internal/types"
-	"github.com/mohammednumaan/shuffle/internal/utils"
+	"github.com/mohammednumaan/shuffle/internal/validation"
 )
 
-func Run(cfg *config.Config) error {
-	if err := utils.ValidateReducerConfig(cfg); err != nil {
+func Run(cfg *types.Config) error {
+	if err := validation.ValidateReducerConfig(cfg); err != nil {
 		return fmt.Errorf("reducer config: %w", err)
 	}
 
@@ -82,7 +81,7 @@ func readPartitionFile(filePath string, grouped map[string][]string) error {
 	}
 }
 
-func writeReducerOutput(cfg *config.Config, groupedData map[string][]string) error {
+func writeReducerOutput(cfg *types.Config, groupedData map[string][]string) error {
 	outputPath := filepath.Join(cfg.OutputDir, fmt.Sprintf("reducer-%d", cfg.ReducerIdx))
 	file, err := os.Create(outputPath)
 	if err != nil {

@@ -41,14 +41,37 @@ type KeyValue[K, V any] struct {
 	Value V `json:"value"`
 }
 
-type MapFunc func(string, string) []KeyValue[string, string]
-
-type ReduceFunc func(string, []string) (string, error)
-
 type Mapper interface {
 	Map(key string, value string) []KeyValue[string, string]
 }
 
 type Reducer interface {
 	Reduce(key string, values []string) (string, error)
+}
+
+type Config struct {
+	Mode      string
+	InputDir  string
+	OutputDir string
+
+	InputFile   string
+	StartOffset int64
+	EndOffset   int64
+
+	NumMappers  int
+	NumReducers int
+	SplitSizeMB int64
+
+	NfsPath    string
+	Image      string
+	Kubeconfig string
+
+	Mapper     Mapper
+	Reducer    Reducer
+	ReducerIdx int
+}
+
+func (cfg *Config) RegisterFn(mapperFn Mapper, reducerFn Reducer) {
+	cfg.Mapper = mapperFn
+	cfg.Reducer = reducerFn
 }

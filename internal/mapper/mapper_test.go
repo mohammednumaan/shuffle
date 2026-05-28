@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mohammednumaan/shuffle/internal/config"
 	"github.com/mohammednumaan/shuffle/internal/types"
 )
 
@@ -53,7 +52,7 @@ func decodePartitionRecords(t *testing.T, path string) []types.KeyValue[string, 
 	return records
 }
 
-func newTestConfig(t *testing.T, data string) *config.Config {
+func newTestConfig(t *testing.T, data string) *types.Config {
 	t.Helper()
 
 	inputFile := filepath.Join(t.TempDir(), "input")
@@ -61,7 +60,7 @@ func newTestConfig(t *testing.T, data string) *config.Config {
 		t.Fatalf("writing test input failed: %v", err)
 	}
 
-	cfg := &config.Config{
+	cfg := &types.Config{
 		InputFile:   inputFile,
 		OutputDir:   filepath.Join(t.TempDir(), "output"),
 		StartOffset: 0,
@@ -208,7 +207,7 @@ func TestProcessSplitWritesIntermediateFilesToDisk(t *testing.T) {
 
 func TestWritePartitionsUsesJSONLines(t *testing.T) {
 	outputDir := t.TempDir()
-	cfg := &config.Config{NumReducers: 1}
+	cfg := &types.Config{NumReducers: 1}
 	kvs := []types.KeyValue[string, string]{
 		{Key: `alpha,"beta"`, Value: "line 1\nline 2"},
 	}

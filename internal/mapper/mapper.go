@@ -12,13 +12,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mohammednumaan/shuffle/internal/config"
 	"github.com/mohammednumaan/shuffle/internal/types"
-	"github.com/mohammednumaan/shuffle/internal/utils"
+	"github.com/mohammednumaan/shuffle/internal/validation"
 )
 
-func Run(cfg *config.Config) error {
-	if err := utils.ValidateMapperConfig(cfg); err != nil {
+func Run(cfg *types.Config) error {
+	if err := validation.ValidateMapperConfig(cfg); err != nil {
 		return fmt.Errorf("mapper config: %w", err)
 	}
 
@@ -29,8 +28,8 @@ func Run(cfg *config.Config) error {
 	return nil
 }
 
-func processSplit(cfg *config.Config) ([]types.KeyValue[string, string], error) {
-	if err := utils.ValidateMapperConfig(cfg); err != nil {
+func processSplit(cfg *types.Config) ([]types.KeyValue[string, string], error) {
+	if err := validation.ValidateMapperConfig(cfg); err != nil {
 		return nil, err
 	}
 
@@ -46,7 +45,7 @@ func processSplit(cfg *config.Config) ([]types.KeyValue[string, string], error) 
 	return kvs, nil
 }
 
-func processFileSplit(cfg *config.Config) ([]types.KeyValue[string, string], error) {
+func processFileSplit(cfg *types.Config) ([]types.KeyValue[string, string], error) {
 	file, err := os.Open(cfg.InputFile)
 	if err != nil {
 		return nil, fmt.Errorf("opening input file: %w", err)
@@ -105,7 +104,7 @@ func processFileSplit(cfg *config.Config) ([]types.KeyValue[string, string], err
 	}
 }
 
-func writePartitions(cfg *config.Config, kvs []types.KeyValue[string, string], outputDir string) error {
+func writePartitions(cfg *types.Config, kvs []types.KeyValue[string, string], outputDir string) error {
 	numPartitions := cfg.NumReducers
 	if numPartitions <= 0 {
 		return errors.New("num reducers must be greater than zero")
