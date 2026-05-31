@@ -1,0 +1,144 @@
+package worker
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+
+	netrpc "net/rpc"
+
+	shufflerpc "github.com/mohammednumaan/shuffle/internal/rpc"
+	"github.com/mohammednumaan/shuffle/internal/types"
+	"github.com/mohammednumaan/shuffle/internal/validation"
+)
+
+var (
+	rpcClients   = make(map[string]*netrpc.Client)
+	rpcClientsMu sync.Mutex
+)
+
+func executeReduceTask(task *types.Task) error {
+	if err := validation.ValidateReduceTask(task); err != nil {
+		return err
+	}
+
+	grouped := make(map[string][]string)
+	for _, loc := range task.PartitionLocations {
+		// these locations are local to the mapper workers
+		// so we need to make an RPC call to the worker to fetch the files
+		data, err := fetchPartition(loc)
+		if err != nil {
+			return fmt.Errorf("fetch partition from worker %s: %w", loc.WorkerAddress, err)
+		}
+
+		if err := decodePartitionData(data, grouped); err != nil {
+			return fmt.Errorf("decode partition data from worker %s: %w", loc.WorkerAddress, err)
+		}
+
+	}
+
+	if err := os.MkdirAll(task.OutputDir, 0o755); err != nil {
+		return fmt.Errorf("output dir %s: %w", task.OutputDir, err)
+	}
+
+	return writeReducerOutput(task.OutputDir, task.ReducerIdx, grouped, reducerFn)
+
+}
+
+func fetchPartition(loc *types.PartitionLocation) ([]byte, error) {
+	client, err := getRPCClient(loc.WorkerAddress)
+	if err != nil {
+		return nil, err
+	}
+
+	args := &shufflerpc.FetchPartitionArgs{
+		FilePath: loc.FilePath,
+	}
+
+	var reply shufflerpc.FetchPartitionReply
+	if err := client.Call("WorkerRPC.FetchPartition", args, &reply); err != nil {
+		return nil, fmt.Errorf("fetch partition rpc call: %w", err)
+	}
+	if reply.Error != "" {
+		return nil, fmt.Errorf("worker error: %s", reply.Error)
+	}
+
+	return reply.Data, nil
+}
+
+// this is to avoid opening a new tcp connection for every partition file
+// since a reducer could be fetching multiple partition files from the same worker, we can reuse the same RPC client connection
+func getRPCClient(addr string) (*netrpc.Client, error) {
+	rpcClientsMu.Lock()
+	defer rpcClientsMu.Unlock()
+
+	if client, ok := rpcClients[addr]; ok {
+		return client, nil
+	}
+
+	client, err := netrpc.Dial("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("dialing worker at %s: %w", addr, err)
+	}
+
+	rpcClients[addr] = client
+	return client, nil
+}
+
+func decodePartitionData(data []byte, grouped map[string][]string) error {
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	for {
+		var record types.KeyValue[string, string]
+		if err := decoder.Decode(&record); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("decoding partition data: %w", err)
+		}
+
+		grouped[record.Key] = append(grouped[record.Key], record.Value)
+	}
+
+	return nil
+}
+
+func writeReducerOutput(outputDir string, reducerIdx int, groupedData map[string][]string, reducer types.Reducer) error {
+	if err := validation.ValidateReducer(reducer); err != nil {
+		return err
+	}
+
+	outputPath := filepath.Join(outputDir, fmt.Sprintf("reducer-%d", reducerIdx))
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("creating output file: %w", err)
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+	encoder := json.NewEncoder(writer)
+
+	keys := make([]string, 0, len(groupedData))
+	for key := range groupedData {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		res, err := reducer.Reduce(key, groupedData[key])
+		if err != nil {
+			return fmt.Errorf("reducing key %s: %w", key, err)
+		}
+		if err := encoder.Encode(types.KeyValue[string, string]{Key: key, Value: res}); err != nil {
+			return fmt.Errorf("encoding output: %w", err)
+		}
+	}
+
+	return writer.Flush()
+}

@@ -1,39 +1,43 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
-	"strconv"
-	"strings"
 	"time"
 
-	"github.com/mohammednumaan/shuffle/internal/config"
-	"github.com/mohammednumaan/shuffle/internal/mapreduce"
-	"github.com/mohammednumaan/shuffle/internal/types"
+	"github.com/mohammednumaan/shuffle/internal/master"
+	"github.com/mohammednumaan/shuffle/internal/worker"
 )
 
-type SomeMap struct{}
-type SomeReduce struct{}
-
-func (sm *SomeMap) Map(key string, value string) []types.KeyValue[string, string] {
-	var kvs []types.KeyValue[string, string]
-	for _, word := range strings.Fields(value) {
-		kvs = append(kvs, types.KeyValue[string, string]{Key: word, Value: "1"})
-	}
-	return kvs
-}
-
-func (sr *SomeReduce) Reduce(key string, values []string) (string, error) {
-	return strconv.Itoa(len(values)), nil
-}
-
 func main() {
-	// the user should provide the cli args as:
-	// go run main.go -mode=master -input-dir=/mnt/nfs/test_dir -output-dir=/path/to/output -num-mappers=4 -num-reducers=2 -nfs-path=/path/to/nfs -image=mohammednumaan/mapreduce:latest
-	cfg := config.SetupJobConfig()
-	cfg.RegisterFn(&SomeMap{}, &SomeReduce{})
-	jobId := fmt.Sprintf("job-%d", time.Now().Unix())
-	if err := mapreduce.ExecuteMapReduce(cfg, jobId); err != nil {
-		log.Fatalf("mapreduce: %v", err)
+	mode := flag.String("mode", "", "mode of operation: master or worker")
+	masterAddr := flag.String("master-addr", "127.0.0.1:9000", "master RPC address")
+	jobID := flag.String("job-id", "", "job identifier (default generated)")
+	inputDir := flag.String("input-dir", "", "path to the input directory")
+	outputDir := flag.String("output-dir", "/tmp/shuffle/output", "path for reduce output")
+	numMappers := flag.Int("num-mappers", 4, "number of mappers")
+	numReducers := flag.Int("num-reducers", 2, "number of reducers")
+	flag.Parse()
+
+	if *jobID == "" {
+		*jobID = fmt.Sprintf("job-%d", time.Now().Unix())
+	}
+
+	switch *mode {
+	case "master":
+		if *inputDir == "" {
+			log.Fatal("input-dir is required in master mode")
+		}
+		if err := master.Run(*jobID, *masterAddr, *inputDir, *outputDir, *numMappers, *numReducers); err != nil {
+			log.Fatalf("master: %v", err)
+		}
+		select {}
+	case "worker":
+		if err := worker.Run(*masterAddr); err != nil {
+			log.Fatalf("worker: %v", err)
+		}
+	default:
+		log.Fatalf("invalid mode %q, expected master or worker", *mode)
 	}
 }
