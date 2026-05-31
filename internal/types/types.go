@@ -5,17 +5,24 @@ import "time"
 type TaskType string
 
 const (
-	MapTask    TaskType = "map"
-	ReduceTask TaskType = "reduce"
+	MapTask    TaskType = "MapTask"
+	ReduceTask TaskType = "ReduceTask"
 )
 
-type TaskStatus string
+type TaskState string
 
 const (
-	Idle       TaskStatus = "idle"
-	InProgress TaskStatus = "in-progress"
-	Completed  TaskStatus = "completed"
-	Failed     TaskStatus = "failed"
+	Idle       TaskState = "Idle"
+	InProgress TaskState = "InProgress"
+	Completed  TaskState = "Completed"
+)
+
+type WorkerState string
+
+const (
+	WorkerIdle        WorkerState = "Idle"
+	WorkerBusy        WorkerState = "Busy"
+	WorkerUnavailable WorkerState = "Unavailable"
 )
 
 type InputSplit struct {
@@ -24,16 +31,41 @@ type InputSplit struct {
 	EndOffset   int64
 }
 
+type PartitionLocation struct {
+	MapTaskId     string
+	WorkerAddress string
+	FilePath      string
+}
+
+type PartitionLocationInfo struct {
+	PartitionIdx  int
+	FilePath      string
+	WorkerAddress string
+}
+
+type Worker struct {
+	WorkerId     string
+	Address      string
+	State        WorkerState
+	LastPolledAt time.Time
+}
+
 type Task struct {
-	Id             string
-	Type           TaskType
-	Status         TaskStatus
-	Split          InputSplit
-	AssignedWorker string
-	OutputPath     string
-	RetryCount     int
-	RetryAfter     time.Time
-	MaxRetries     int
+	TaskId string
+	JobId  string
+	Type   TaskType
+	State  TaskState
+
+	AssignedWorkerId string
+	Split            *InputSplit
+	InputDir         string
+	OutputDir        string
+	ReducerIdx       int
+	NumReducers      int
+
+	RetryCount         int
+	MaxRetries         int
+	PartitionLocations []*PartitionLocation
 }
 
 type KeyValue[K, V any] struct {
@@ -47,31 +79,4 @@ type Mapper interface {
 
 type Reducer interface {
 	Reduce(key string, values []string) (string, error)
-}
-
-type Config struct {
-	Mode      string
-	InputDir  string
-	OutputDir string
-
-	InputFile   string
-	StartOffset int64
-	EndOffset   int64
-
-	NumMappers  int
-	NumReducers int
-	SplitSizeMB int64
-
-	NfsPath    string
-	Image      string
-	Kubeconfig string
-
-	Mapper     Mapper
-	Reducer    Reducer
-	ReducerIdx int
-}
-
-func (cfg *Config) RegisterFn(mapperFn Mapper, reducerFn Reducer) {
-	cfg.Mapper = mapperFn
-	cfg.Reducer = reducerFn
 }
