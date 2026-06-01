@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -54,14 +55,20 @@ func executeMapTask(task *types.Task, workerAddress string) ([]types.PartitionLo
 
 	outputDir := filepath.Join(os.TempDir(), "shuffle", task.JobId, task.TaskId)
 
+	log.Printf("[Mapper %s] processing file=%s offset=%d-%d", task.TaskId, task.Split.FilePath, task.Split.StartOffset, task.Split.EndOffset)
+
 	kvs, err := processFileSplit(task.Split, mapperFn)
 	if err != nil {
 		return nil, fmt.Errorf("process file split: %w", err)
 	}
 
+	log.Printf("[Mapper %s] produced %d key-value pairs", task.TaskId, len(kvs))
+
 	if err := writePartitions(task.NumReducers, kvs, outputDir); err != nil {
 		return nil, fmt.Errorf("write partitions: %w", err)
 	}
+
+	log.Printf("[Mapper %s] wrote %d partitions to %s", task.TaskId, task.NumReducers, outputDir)
 
 	locations := make([]types.PartitionLocationInfo, task.NumReducers)
 	for i := 0; i < task.NumReducers; i++ {

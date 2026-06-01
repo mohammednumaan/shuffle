@@ -28,17 +28,14 @@ func requireTask(task *types.Task) error {
 	return nil
 }
 
-func ValidateMasterRuntime(inputDirectory, outputDirectory string, numMappers, numReducers int) error {
+func ValidateMasterRuntime(inputDirectory, outputDirectory string, numMachines int) error {
 	if err := requireNonEmpty(inputDirectory, "input directory"); err != nil {
 		return err
 	}
 	if err := requireNonEmpty(outputDirectory, "output directory"); err != nil {
 		return err
 	}
-	if err := requirePositive(numMappers, "num mappers"); err != nil {
-		return err
-	}
-	if err := requirePositive(numReducers, "num reducers"); err != nil {
+	if err := requirePositive(numMachines, "num machines"); err != nil {
 		return err
 	}
 	return nil

@@ -2,6 +2,7 @@ package master
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"net"
 	netrpc "net/rpc"
@@ -28,13 +29,13 @@ type Master struct {
 	mu                 sync.Mutex
 }
 
-func Run(jobId, addr, inputDirectory, outputDirectory string, numMappers, numReducers int) error {
-	master, err := NewMaster(jobId, addr, inputDirectory, outputDirectory, numMappers, numReducers)
+func Run(jobId, addr, inputDirectory, outputDirectory string, numMachines int) error {
+	master, err := NewMaster(jobId, addr, inputDirectory, outputDirectory, numMachines)
 	if err != nil {
 		return fmt.Errorf("create master: %w", err)
 	}
 
-	splits, err := BuildInputSplitsForMappers(inputDirectory, numMappers)
+	splits, err := BuildInputSplitsForMappers(inputDirectory, master.NumMappers)
 	if err != nil {
 		return fmt.Errorf("build input splits: %w", err)
 	}
@@ -44,10 +45,13 @@ func Run(jobId, addr, inputDirectory, outputDirectory string, numMappers, numRed
 	return nil
 }
 
-func NewMaster(jobId, addr, inputDirectory, outputDirectory string, numMappers, numReducers int) (*Master, error) {
-	if err := validation.ValidateMasterRuntime(inputDirectory, outputDirectory, numMappers, numReducers); err != nil {
+func NewMaster(jobId, addr, inputDirectory, outputDirectory string, numMachines int) (*Master, error) {
+	if err := validation.ValidateMasterRuntime(inputDirectory, outputDirectory, numMachines); err != nil {
 		return nil, err
 	}
+
+	numMappers := numMachines
+	numReducers := numMachines
 
 	master := Master{
 		JobId:              jobId,
@@ -88,6 +92,7 @@ func (m *Master) RegisterWorker(args *shufflerpc.RegisterWorkerArgs, reply *shuf
 	if worker, exists := m.Workers[args.WorkerId]; exists {
 		worker.LastPolledAt = time.Now()
 		worker.State = types.WorkerIdle
+		log.Printf("[Master] worker re-registered: id=%s addr=%s", args.WorkerId, args.Address)
 		reply.Error = ""
 		return nil
 	}
@@ -99,6 +104,7 @@ func (m *Master) RegisterWorker(args *shufflerpc.RegisterWorkerArgs, reply *shuf
 		LastPolledAt: time.Now(),
 	}
 
+	log.Printf("[Master] worker registered: id=%s addr=%s (total=%d)", args.WorkerId, args.Address, len(m.Workers))
 	reply.Error = ""
 	return nil
 }
@@ -205,6 +211,7 @@ func CreateReduceTasks(master *Master) {
 		}
 		master.ReduceTasks = append(master.ReduceTasks, task)
 	}
+	log.Printf("[Master] created %d reduce tasks", len(master.ReduceTasks))
 }
 
 func (m *Master) AssignTask(args *shufflerpc.AssignTaskArgs, reply *shufflerpc.AssignTaskReply) error {
@@ -220,6 +227,7 @@ func (m *Master) AssignTask(args *shufflerpc.AssignTaskArgs, reply *shufflerpc.A
 			task.State = types.InProgress
 			task.AssignedWorkerId = args.WorkerId
 			reply.Task = *task
+			log.Printf("[Master] assigned map task: %s -> worker=%s", task.TaskId, args.WorkerId)
 			reply.Error = ""
 			return nil
 		}
@@ -230,6 +238,7 @@ func (m *Master) AssignTask(args *shufflerpc.AssignTaskArgs, reply *shufflerpc.A
 			task.State = types.InProgress
 			task.AssignedWorkerId = args.WorkerId
 			reply.Task = *task
+			log.Printf("[Master] assigned reduce task: %s -> worker=%s", task.TaskId, args.WorkerId)
 			reply.Error = ""
 			return nil
 		}
@@ -262,10 +271,10 @@ func (m *Master) ReportTaskCompletion(args *shufflerpc.ReportTaskCompletionArgs,
 				)
 			}
 
-			// if all the map tasks are complete
-			// i can safely create the reduce tasks since
-			// all map tasks are finished
+			log.Printf("[Master] map task completed: %s worker=%s partitions=%d", task.TaskId, args.WorkerId, len(args.PartitionLocations))
+
 			if m.CheckIfMapPhaseComplete() {
+				log.Printf("[Master] ALL MAP TASKS COMPLETE — creating reduce tasks")
 				CreateReduceTasks(m)
 			}
 
@@ -281,6 +290,7 @@ func (m *Master) ReportTaskCompletion(args *shufflerpc.ReportTaskCompletionArgs,
 				return nil
 			}
 			task.State = types.Completed
+			log.Printf("[Master] reduce task completed: %s worker=%s", task.TaskId, args.WorkerId)
 			reply.Error = ""
 			return nil
 		}
