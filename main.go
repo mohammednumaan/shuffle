@@ -16,8 +16,7 @@ func main() {
 	jobID := flag.String("job-id", "", "job identifier (default generated)")
 	inputDir := flag.String("input-dir", "", "path to the input directory")
 	outputDir := flag.String("output-dir", "/tmp/shuffle/output", "path for reduce output")
-	numMappers := flag.Int("num-mappers", 4, "number of mappers")
-	numReducers := flag.Int("num-reducers", 2, "number of reducers")
+	numMachines := flag.Int("num-machines", 4, "number of machines in the cluster")
 	flag.Parse()
 
 	if *jobID == "" {
@@ -29,7 +28,7 @@ func main() {
 		if *inputDir == "" {
 			log.Fatal("input-dir is required in master mode")
 		}
-		if err := master.Run(*jobID, *masterAddr, *inputDir, *outputDir, *numMappers, *numReducers); err != nil {
+		if err := master.Run(*jobID, *masterAddr, *inputDir, *outputDir, *numMachines); err != nil {
 			log.Fatalf("master: %v", err)
 		}
 		select {}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,10 +29,11 @@ func executeReduceTask(task *types.Task) error {
 		return err
 	}
 
+	log.Printf("[Reducer %s] starting with %d partition locations", task.TaskId, len(task.PartitionLocations))
+
 	grouped := make(map[string][]string)
 	for _, loc := range task.PartitionLocations {
-		// these locations are local to the mapper workers
-		// so we need to make an RPC call to the worker to fetch the files
+		log.Printf("[Reducer %s] fetching partition from %s", task.TaskId, loc.WorkerAddress)
 		data, err := fetchPartition(loc)
 		if err != nil {
 			return fmt.Errorf("fetch partition from worker %s: %w", loc.WorkerAddress, err)
@@ -42,6 +44,8 @@ func executeReduceTask(task *types.Task) error {
 		}
 
 	}
+
+	log.Printf("[Reducer %s] grouped into %d unique keys", task.TaskId, len(grouped))
 
 	if err := os.MkdirAll(task.OutputDir, 0o755); err != nil {
 		return fmt.Errorf("output dir %s: %w", task.OutputDir, err)
@@ -115,6 +119,7 @@ func writeReducerOutput(outputDir string, reducerIdx int, groupedData map[string
 	}
 
 	outputPath := filepath.Join(outputDir, fmt.Sprintf("reducer-%d", reducerIdx))
+	log.Printf("[Reducer] writing output to %s (%d keys)", outputPath, len(groupedData))
 	file, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("creating output file: %w", err)

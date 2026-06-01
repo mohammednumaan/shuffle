@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: master
+  namespace: shuffle
+spec:
+  selector:
+    app: shuffle
+    role: master
+  ports:
+    - port: 9000
+      targetPort: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: master
+  namespace: shuffle
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shuffle
+      role: master
+  template:
+    metadata:
+      labels:
+        app: shuffle
+        role: master
+    spec:
+      containers:
+        - name: master
+          image: shuffle:dev
+          imagePullPolicy: Never
+          args:
+            - -mode=master
+            - -master-addr=0.0.0.0:9000
+            - -input-dir=/data/input
+            - -output-dir=/data/output
+            - -num-machines=4
+          ports:
+            - containerPort: 9000
+          volumeMounts:
+            - name: input
+              mountPath: /data/input
+            - name: output
+              mountPath: /data/output
+      volumes:
+        - name: input
+          hostPath:
+            path: /tmp/shuffle-input
+            type: DirectoryOrCreate
+        - name: output
+          hostPath:
+            path: /tmp/shuffle-output
+            type: DirectoryOrCreate

@@ -76,6 +76,7 @@ func Run(masterAddress string) error {
 	if registerReply.Error != "" {
 		return fmt.Errorf("register worker error: %s", registerReply.Error)
 	}
+	log.Printf("[Worker %s] registered with master at %s", workerID, masterAddress)
 
 	pollInterval := 2 * time.Second
 	for {
@@ -93,12 +94,20 @@ func Run(masterAddress string) error {
 			continue
 		}
 
+		taskType := "map"
+		if reply.Task.Type == types.ReduceTask {
+			taskType = "reduce"
+		}
+		log.Printf("[Worker %s] received %s task: %s", workerID, taskType, reply.Task.TaskId)
+
 		locations, err := executeTask(&reply.Task, workerAddress)
 		if err != nil {
-			log.Printf("worker=%s task=%s failed: %v", workerID, reply.Task.TaskId, err)
+			log.Printf("[Worker %s] task=%s failed: %v", workerID, reply.Task.TaskId, err)
 			time.Sleep(pollInterval)
 			continue
 		}
+
+		log.Printf("[Worker %s] task=%s completed", workerID, reply.Task.TaskId)
 
 		reportArgs := &shufflerpc.ReportTaskCompletionArgs{
 			TaskId:             reply.Task.TaskId,
@@ -107,15 +116,17 @@ func Run(masterAddress string) error {
 		}
 		var reportReply shufflerpc.ReportTaskCompletionReply
 		if err := client.Call("Master.ReportTaskCompletion", reportArgs, &reportReply); err != nil {
-			log.Printf("worker=%s report completion rpc failed: %v", workerID, err)
+			log.Printf("[Worker %s] report completion rpc failed: %v", workerID, err)
 			time.Sleep(pollInterval)
 			continue
 		}
 		if reportReply.Error != "" {
-			log.Printf("worker=%s report completion error: %s", workerID, reportReply.Error)
+			log.Printf("[Worker %s] report completion error: %s", workerID, reportReply.Error)
 			time.Sleep(pollInterval)
 			continue
 		}
+
+		log.Printf("[Worker %s] task=%s reported to master successfully", workerID, reply.Task.TaskId)
 	}
 }
 
