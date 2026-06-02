@@ -119,12 +119,12 @@ func writeReducerOutput(outputDir string, reducerIdx int, groupedData map[string
 	}
 
 	outputPath := filepath.Join(outputDir, fmt.Sprintf("reducer-%d", reducerIdx))
+	tmpOutputPath := fmt.Sprintf("%s.tmp", outputPath)
 	log.Printf("[Reducer] writing output to %s (%d keys)", outputPath, len(groupedData))
-	file, err := os.Create(outputPath)
+	file, err := os.Create(tmpOutputPath)
 	if err != nil {
 		return fmt.Errorf("creating output file: %w", err)
 	}
-	defer file.Close()
 
 	writer := bufio.NewWriter(file)
 	encoder := json.NewEncoder(writer)
@@ -145,5 +145,18 @@ func writeReducerOutput(outputDir string, reducerIdx int, groupedData map[string
 		}
 	}
 
-	return writer.Flush()
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("flushing writer: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("syncing output file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("closing output file: %w", err)
+	}
+	if err := os.Rename(tmpOutputPath, outputPath); err != nil {
+		return fmt.Errorf("atomic replace output file: %w", err)
+	}
+
+	return nil
 }

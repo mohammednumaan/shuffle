@@ -63,8 +63,6 @@ type Task struct {
 	ReducerIdx       int
 	NumReducers      int
 
-	RetryCount         int
-	MaxRetries         int
 	PartitionLocations []*PartitionLocation
 }
 
