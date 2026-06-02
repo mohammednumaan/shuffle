@@ -25,6 +25,12 @@ func (w *WorkerRPC) FetchPartition(args *shufflerpc.FetchPartitionArgs, reply *s
 	return nil
 }
 
+// this will be called by the master to constantly poll
+// if this specific worker is active (for fault tolerance)
+func (w *WorkerRPC) Ping(args *shufflerpc.PingArgs, reply *shufflerpc.PingReply) error {
+	return nil
+}
+
 func StartWorkerRPCServer(addr string) error {
 	if err := netrpc.Register(&WorkerRPC{}); err != nil {
 		return fmt.Errorf("register worker rpc: %w", err)

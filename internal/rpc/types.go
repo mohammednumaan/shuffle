@@ -40,3 +40,6 @@ type FetchPartitionReply struct {
 	Data  []byte
 	Error string
 }
+
+type PingArgs struct{}
+type PingReply struct{}
