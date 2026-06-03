@@ -173,6 +173,7 @@ sequenceDiagram
 - a completion is only accepted if the task is actually **running** and came from the **right worker**.
 - output is written to a **temp file and atomically renamed** no partial files ever show up as final.
 - once the job is **done**, workers get no more tasks dead workers at the finish line don't trigger any recomputation.
+- if a mapper dies while a reducer is fetching its partition, the reducer reports the failure to the master via `ReportTaskFailure` rpc. the master resets the reduce task, evicts the dead mapper's partition locations, requeues the affected map tasks to regenerate the data, and refreshes the remaining reduce tasks with live locations only.
 
 ## usage
 
