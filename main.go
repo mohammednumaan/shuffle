@@ -4,11 +4,30 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mohammednumaan/shuffle/internal/master"
+	"github.com/mohammednumaan/shuffle/internal/types"
 	"github.com/mohammednumaan/shuffle/internal/worker"
 )
+
+type defaultMapper struct{}
+
+func (defaultMapper) Map(_ string, value string) []types.KeyValue[string, string] {
+	var kvs []types.KeyValue[string, string]
+	for _, word := range strings.Fields(value) {
+		kvs = append(kvs, types.KeyValue[string, string]{Key: word, Value: "1"})
+	}
+	return kvs
+}
+
+type defaultReducer struct{}
+
+func (defaultReducer) Reduce(_ string, values []string) (string, error) {
+	return strconv.Itoa(len(values)), nil
+}
 
 func main() {
 	mode := flag.String("mode", "", "mode of operation: master or worker")
@@ -31,8 +50,10 @@ func main() {
 		if err := master.Run(*jobID, *masterAddr, *inputDir, *outputDir, *numMachines); err != nil {
 			log.Fatalf("master: %v", err)
 		}
-		select {}
 	case "worker":
+		if err := worker.RegisterFunctions(defaultMapper{}, defaultReducer{}); err != nil {
+			log.Fatalf("register functions: %v", err)
+		}
 		if err := worker.Run(*masterAddr); err != nil {
 			log.Fatalf("worker: %v", err)
 		}

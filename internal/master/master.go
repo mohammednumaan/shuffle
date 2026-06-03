@@ -33,6 +33,7 @@ type Master struct {
 	NumMappers         int
 	NumReducers        int
 	mu                 sync.Mutex
+	Done               chan struct{}
 }
 
 func Run(jobId, addr, inputDirectory, outputDirectory string, numMachines int) error {
@@ -47,6 +48,9 @@ func Run(jobId, addr, inputDirectory, outputDirectory string, numMachines int) e
 	}
 
 	CreateMapTasks(master, splits)
+
+	<-master.Done
+	log.Printf("[Master] job %s complete, shutting down", jobId)
 	return nil
 }
 
@@ -69,6 +73,7 @@ func NewMaster(jobId, addr, inputDirectory, outputDirectory string, numMachines 
 		OutputDirectory:    outputDirectory,
 		NumMappers:         numMappers,
 		NumReducers:        numReducers,
+		Done:               make(chan struct{}),
 	}
 
 	if err := netrpc.Register(&master); err != nil {
@@ -348,6 +353,7 @@ func (m *Master) ReportTaskCompletion(args *shufflerpc.ReportTaskCompletionArgs,
 			if len(m.ReduceTasks) > 0 && completed == len(m.ReduceTasks) {
 				m.JobCompleted = true
 				log.Printf("[Master] ALL REDUCE TASKS COMPLETE")
+				close(m.Done)
 			}
 			reply.Error = ""
 			return nil
@@ -355,6 +361,45 @@ func (m *Master) ReportTaskCompletion(args *shufflerpc.ReportTaskCompletionArgs,
 	}
 
 	reply.Error = fmt.Sprintf("task %s not found", args.TaskId)
+	return nil
+}
+
+func (m *Master) ReportTaskFailure(args *shufflerpc.ReportTaskFailureArgs, reply *shufflerpc.ReportTaskFailureReply) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	task := m.findTask(args.TaskId)
+	if task == nil {
+		reply.Error = fmt.Sprintf("task %s not found", args.TaskId)
+		return nil
+	}
+
+	log.Printf("[Master] task %s failed: worker=%s failedWorker=%s error=%s", args.TaskId, args.WorkerId, args.FailedWorkerAddr, args.Error)
+
+	m.resetTasks(args.WorkerId, task)
+
+	if args.FailedWorkerAddr != "" {
+		affectedMapTasks, affectedPartitions := m.cleanupPartitionLocations(args.FailedWorkerAddr)
+		if m.requeueCompletedMapTasks(affectedMapTasks) {
+			m.resetAffectedReduceTasks(affectedPartitions)
+		}
+		CreateReduceTasks(m)
+	}
+	reply.Error = ""
+	return nil
+}
+
+func (m *Master) findTask(taskId string) *types.Task {
+	for _, t := range m.MapTasks {
+		if t.TaskId == taskId {
+			return t
+		}
+	}
+	for _, t := range m.ReduceTasks {
+		if t.TaskId == taskId {
+			return t
+		}
+	}
 	return nil
 }
 

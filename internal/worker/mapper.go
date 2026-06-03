@@ -16,38 +16,6 @@ import (
 	"github.com/mohammednumaan/shuffle/internal/validation"
 )
 
-var mapperFn types.Mapper = defaultMapper{}
-var reducerFn types.Reducer = defaultReducer{}
-
-func RegisterFunctions(mapper types.Mapper, reducer types.Reducer) error {
-	if err := validation.ValidateMapper(mapper); err != nil {
-		return err
-	}
-	if err := validation.ValidateReducer(reducer); err != nil {
-		return err
-	}
-
-	mapperFn = mapper
-	reducerFn = reducer
-	return nil
-}
-
-type defaultMapper struct{}
-
-func (defaultMapper) Map(_ string, value string) []types.KeyValue[string, string] {
-	var kvs []types.KeyValue[string, string]
-	for _, word := range strings.Fields(value) {
-		kvs = append(kvs, types.KeyValue[string, string]{Key: word, Value: "1"})
-	}
-	return kvs
-}
-
-type defaultReducer struct{}
-
-func (defaultReducer) Reduce(_ string, values []string) (string, error) {
-	return strconv.Itoa(len(values)), nil
-}
-
 func executeMapTask(task *types.Task, workerAddress string) ([]types.PartitionLocationInfo, error) {
 	if err := validation.ValidateMapTask(task); err != nil {
 		return nil, err
@@ -56,6 +24,10 @@ func executeMapTask(task *types.Task, workerAddress string) ([]types.PartitionLo
 	outputDir := filepath.Join(os.TempDir(), "shuffle", task.JobId, task.TaskId)
 
 	log.Printf("[Mapper %s] processing file=%s offset=%d-%d", task.TaskId, task.Split.FilePath, task.Split.StartOffset, task.Split.EndOffset)
+
+	if mapperFn == nil {
+		return nil, fmt.Errorf("mapper function not registered")
+	}
 
 	kvs, err := processFileSplit(task.Split, mapperFn)
 	if err != nil {
@@ -84,9 +56,6 @@ func executeMapTask(task *types.Task, workerAddress string) ([]types.PartitionLo
 }
 
 func processFileSplit(split *types.InputSplit, mapper types.Mapper) ([]types.KeyValue[string, string], error) {
-	if err := validation.ValidateMapper(mapper); err != nil {
-		return nil, err
-	}
 	if err := validation.ValidateInputSplit(split); err != nil {
 		return nil, err
 	}

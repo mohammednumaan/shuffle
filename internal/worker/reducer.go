@@ -24,9 +24,9 @@ var (
 	rpcClientsMu sync.Mutex
 )
 
-func executeReduceTask(task *types.Task) error {
+func executeReduceTask(task *types.Task) (string, error) {
 	if err := validation.ValidateReduceTask(task); err != nil {
-		return err
+		return "", err
 	}
 
 	log.Printf("[Reducer %s] starting with %d partition locations", task.TaskId, len(task.PartitionLocations))
@@ -36,11 +36,11 @@ func executeReduceTask(task *types.Task) error {
 		log.Printf("[Reducer %s] fetching partition from %s", task.TaskId, loc.WorkerAddress)
 		data, err := fetchPartition(loc)
 		if err != nil {
-			return fmt.Errorf("fetch partition from worker %s: %w", loc.WorkerAddress, err)
+			return loc.WorkerAddress, fmt.Errorf("fetch partition from worker %s: %w", loc.WorkerAddress, err)
 		}
 
 		if err := decodePartitionData(data, grouped); err != nil {
-			return fmt.Errorf("decode partition data from worker %s: %w", loc.WorkerAddress, err)
+			return "", fmt.Errorf("decode partition data from worker %s: %w", loc.WorkerAddress, err)
 		}
 
 	}
@@ -48,10 +48,14 @@ func executeReduceTask(task *types.Task) error {
 	log.Printf("[Reducer %s] grouped into %d unique keys", task.TaskId, len(grouped))
 
 	if err := os.MkdirAll(task.OutputDir, 0o755); err != nil {
-		return fmt.Errorf("output dir %s: %w", task.OutputDir, err)
+		return "", fmt.Errorf("output dir %s: %w", task.OutputDir, err)
 	}
 
-	return writeReducerOutput(task.OutputDir, task.ReducerIdx, grouped, reducerFn)
+	if reducerFn == nil {
+		return "", fmt.Errorf("reducer function not registered")
+	}
+
+	return "", writeReducerOutput(task.OutputDir, task.ReducerIdx, grouped, reducerFn)
 
 }
 
@@ -114,10 +118,6 @@ func decodePartitionData(data []byte, grouped map[string][]string) error {
 }
 
 func writeReducerOutput(outputDir string, reducerIdx int, groupedData map[string][]string, reducer types.Reducer) error {
-	if err := validation.ValidateReducer(reducer); err != nil {
-		return err
-	}
-
 	outputPath := filepath.Join(outputDir, fmt.Sprintf("reducer-%d", reducerIdx))
 	tmpOutputPath := fmt.Sprintf("%s.tmp", outputPath)
 	log.Printf("[Reducer] writing output to %s (%d keys)", outputPath, len(groupedData))

@@ -11,7 +11,24 @@ import (
 	"github.com/google/uuid"
 	shufflerpc "github.com/mohammednumaan/shuffle/internal/rpc"
 	"github.com/mohammednumaan/shuffle/internal/types"
+	"github.com/mohammednumaan/shuffle/internal/validation"
 )
+
+var mapperFn types.Mapper
+var reducerFn types.Reducer
+
+func RegisterFunctions(mapper types.Mapper, reducer types.Reducer) error {
+	if err := validation.ValidateMapper(mapper); err != nil {
+		return err
+	}
+	if err := validation.ValidateReducer(reducer); err != nil {
+		return err
+	}
+
+	mapperFn = mapper
+	reducerFn = reducer
+	return nil
+}
 
 type WorkerRPC struct{}
 
@@ -106,9 +123,23 @@ func Run(masterAddress string) error {
 		}
 		log.Printf("[Worker %s] received %s task: %s", workerID, taskType, reply.Task.TaskId)
 
-		locations, err := executeTask(&reply.Task, workerAddress)
+		locations, failedWorkerAddr, err := executeTask(&reply.Task, workerAddress)
 		if err != nil {
 			log.Printf("[Worker %s] task=%s failed: %v", workerID, reply.Task.TaskId, err)
+
+			failureArgs := &shufflerpc.ReportTaskFailureArgs{
+				TaskId:           reply.Task.TaskId,
+				WorkerId:         workerID,
+				FailedWorkerAddr: failedWorkerAddr,
+				Error:            err.Error(),
+			}
+			var failureReply shufflerpc.ReportTaskFailureReply
+			if rpcErr := client.Call("Master.ReportTaskFailure", failureArgs, &failureReply); rpcErr != nil {
+				log.Printf("[Worker %s] report failure rpc failed: %v", workerID, rpcErr)
+			} else if failureReply.Error != "" {
+				log.Printf("[Worker %s] report failure error: %s", workerID, failureReply.Error)
+			}
+
 			time.Sleep(pollInterval)
 			continue
 		}
@@ -136,13 +167,15 @@ func Run(masterAddress string) error {
 	}
 }
 
-func executeTask(task *types.Task, workerAddress string) ([]types.PartitionLocationInfo, error) {
+func executeTask(task *types.Task, workerAddress string) (locations []types.PartitionLocationInfo, failedWorkerAddr string, err error) {
 	switch task.Type {
 	case types.MapTask:
-		return executeMapTask(task, workerAddress)
+		locs, err := executeMapTask(task, workerAddress)
+		return locs, "", err
 	case types.ReduceTask:
-		return nil, executeReduceTask(task)
+		failedAddr, err := executeReduceTask(task)
+		return nil, failedAddr, err
 	default:
-		return nil, fmt.Errorf("unknown task type: %s", task.Type)
+		return nil, "", fmt.Errorf("unknown task type: %s", task.Type)
 	}
 }

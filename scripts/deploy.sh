@@ -51,29 +51,88 @@ parse_args() {
 
 parse_args "$@"
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+pre_checks() {
+  local fail=false
+
+  if ! command -v docker &>/dev/null; then
+    echo "MISSING: docker is not installed"
+    fail=true
+  fi
+
+  if ! command -v minikube &>/dev/null; then
+    echo "MISSING: minikube is not installed"
+    fail=true
+  fi
+
+  if ! command -v kubectl &>/dev/null; then
+    echo "MISSING: kubectl is not installed"
+    fail=true
+  fi
+
+  if [ ! -d "$PROJECT_ROOT/sample_input" ] || [ -z "$(ls -A "$PROJECT_ROOT/sample_input" 2>/dev/null)" ]; then
+    echo "MISSING: sample_input/ is empty or missing — run scripts/download_gutenberg.py first"
+    fail=true
+  fi
+
+  if [ ! -f "$PROJECT_ROOT/infra/namespaces.yaml" ] || \
+     [ ! -f "$PROJECT_ROOT/infra/master.yaml" ] || \
+     [ ! -f "$PROJECT_ROOT/infra/worker.yaml" ]; then
+    echo "MISSING: infra manifests (namespaces.yaml, master.yaml, worker.yaml) not found in infra/"
+    fail=true
+  fi
+
+  if [ ! -f "$PROJECT_ROOT/Dockerfile" ]; then
+    echo "MISSING: Dockerfile not found at project root"
+    fail=true
+  fi
+
+  if [ ! -f "$PROJECT_ROOT/go.mod" ]; then
+    echo "MISSING: go.mod not found — is this the right project root?"
+    fail=true
+  fi
+
+  if [ "$RUN_FAULT_SIMULATION" = true ] && [ ! -f "$SCRIPT_DIR/fault_simulation.sh" ]; then
+    echo "MISSING: fault_simulation.sh not found in scripts/ (required when --no-fault-sim is not set)"
+    fail=true
+  fi
+
+  if $fail; then
+    echo ""
+    echo "Pre-checks failed. Fix the issues above and re-run."
+    exit 1
+  fi
+}
+
+echo "===== Running pre-checks ====="
+pre_checks
+echo "  -> all checks passed"
+
 echo "===== Starting Minikube ====="
 minikube start
 
 echo "===== Using Minikube Docker ====="
 eval "$(minikube docker-env)"
 
-echo "===== Building image ====="
-docker build -t ${IMAGE} ..
+echo "===== Building image from $PROJECT_ROOT ====="
+docker build -t ${IMAGE} "$PROJECT_ROOT"
 
 echo "===== Creating shared directories in Minikube ====="
 minikube ssh "sudo mkdir -p /tmp/shuffle-input /tmp/shuffle-output"
 
 echo "===== Copying input files ====="
-for f in ../sample_input/*; do
+for f in "$PROJECT_ROOT/sample_input"/*; do
   minikube cp "$f" /tmp/shuffle-input/
 done
-echo "  -> $(ls ../sample_input/ | wc -l) files copied to /tmp/shuffle-input"
+echo "  -> $(ls "$PROJECT_ROOT/sample_input/" | wc -l) files copied to /tmp/shuffle-input"
 
 echo "===== Creating namespace ====="
-kubectl apply -f ../infra/namespaces.yaml
+kubectl apply -f "$PROJECT_ROOT/infra/namespaces.yaml"
 
 echo "===== Deploying master ====="
-kubectl apply -f ../infra/master.yaml
+kubectl apply -f "$PROJECT_ROOT/infra/master.yaml"
 
 echo "===== Restarting master to pick latest image ====="
 kubectl rollout restart deployment/master -n ${NAMESPACE}
@@ -82,7 +141,7 @@ echo "===== Waiting for master ====="
 kubectl rollout status deployment/master -n ${NAMESPACE} --timeout=120s
 
 echo "===== Deploying workers ====="
-kubectl apply -f ../infra/worker.yaml
+kubectl apply -f "$PROJECT_ROOT/infra/worker.yaml"
 
 echo "===== Restarting workers to pick latest image ====="
 kubectl rollout restart deployment/worker -n ${NAMESPACE}
@@ -111,7 +170,7 @@ kubectl logs -n ${NAMESPACE} deployment/master --tail=50
 if [[ "$RUN_FAULT_SIMULATION" == true ]]; then
   echo
   echo "===== Running fault simulation ====="
-  ./fault_simulation.sh \
+  "$SCRIPT_DIR/fault_simulation.sh" \
     --namespace "${NAMESPACE}" \
     --worker-deploy worker \
     --master-deploy master \

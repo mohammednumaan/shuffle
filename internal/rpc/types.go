@@ -41,5 +41,16 @@ type FetchPartitionReply struct {
 	Error string
 }
 
+type ReportTaskFailureArgs struct {
+	TaskId           string
+	WorkerId         string
+	FailedWorkerAddr string
+	Error            string
+}
+
+type ReportTaskFailureReply struct {
+	Error string
+}
+
 type PingArgs struct{}
 type PingReply struct{}
